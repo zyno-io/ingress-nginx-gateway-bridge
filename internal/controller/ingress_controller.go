@@ -139,6 +139,15 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 		AllowSnippets: r.Config.AllowSnippets,
 		Strict:        r.Config.Strict,
 	}
+	var gatewayPlan translator.GatewayPlan
+	if r.Config.ManageGateway {
+		var err error
+		gatewayPlan, err = r.reconcileManagedGateway(ctx)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		options.TLSHosts = gatewayPlan.TLSHosts
+	}
 	settingsAsSnippets, err := r.requiresSettingsSnippets(ctx, &ing)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -146,10 +155,6 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 	options.SettingsAsSnippets = settingsAsSnippets
 	plan := translator.Translate(ctx, &ing, options, r.resolveServicePort, r.resolveConfigMap)
 	if r.Config.ManageGateway {
-		gatewayPlan, err := r.reconcileManagedGateway(ctx)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
 		plan.Issues = append(plan.Issues, gatewayPlan.Issues[request.NamespacedName]...)
 	}
 

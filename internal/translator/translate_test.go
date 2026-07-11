@@ -192,6 +192,54 @@ func TestSSLRedirectFalseAttachesHTTPAndHTTPS(t *testing.T) {
 	}
 }
 
+func TestEmptyTLSHostsInferIngressRuleHosts(t *testing.T) {
+	ing := testIngress(nil)
+	ing.Spec.TLS[0].Hosts = nil
+	plan := BuildManagedGateway([]networkingv1.Ingress{*ing}, ManagedGatewayOptions{
+		Namespace: "gateway", Name: "public", ClassName: "nginx", HTTPSectionName: "http", HTTPSSectionName: "https",
+	})
+	if _, found := plan.TLSHosts["app.zyno.io"]; !found {
+		t.Fatalf("inferred TLS host is missing: %#v", plan.TLSHosts)
+	}
+	options := testOptions()
+	options.TLSHosts = plan.TLSHosts
+	translated := Translate(context.Background(), ing, options, nil, nil)
+	if translated.Fatal() {
+		t.Fatalf("plan unexpectedly fatal: %#v", translated.Issues)
+	}
+	if got := string(*translated.HTTPRoutes[0].Spec.ParentRefs[0].SectionName); got != "https" {
+		t.Fatalf("listener = %q, want https", got)
+	}
+}
+
+func TestSharedHostTLSAttachesSiblingRoute(t *testing.T) {
+	ing := testIngress(map[string]string{annSSLRedirect: "false"})
+	ing.Spec.TLS = nil
+	options := testOptions()
+	options.TLSHosts = map[string]struct{}{"app.zyno.io": {}}
+	plan := Translate(context.Background(), ing, options, nil, nil)
+	if plan.Fatal() {
+		t.Fatalf("plan unexpectedly fatal: %#v", plan.Issues)
+	}
+	if got := len(plan.HTTPRoutes[0].Spec.ParentRefs); got != 2 {
+		t.Fatalf("parent refs = %d, want HTTP and inherited HTTPS", got)
+	}
+}
+
+func TestRejectsIngressNginxEscapedRequestURI(t *testing.T) {
+	ing := testIngress(map[string]string{
+		annAuthURL:    "https://auth.zyno.dev/oauth2/auth",
+		annAuthSignin: "https://auth.zyno.dev/oauth2/start?rd=$scheme://$http_host$escaped_request_uri",
+	})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if !plan.Fatal() {
+		t.Fatal("ingress-nginx-specific auth-signin variable was accepted")
+	}
+	if len(plan.SnippetsFilters) != 0 {
+		t.Fatal("invalid auth-signin emitted a SnippetsFilter")
+	}
+}
+
 func testIngress(annotations map[string]string) *networkingv1.Ingress {
 	pathType := networkingv1.PathTypePrefix
 	return &networkingv1.Ingress{

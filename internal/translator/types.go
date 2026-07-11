@@ -62,7 +62,11 @@ type GatewayOptions struct {
 
 // Options controls compatibility behavior.
 type Options struct {
-	Gateway            GatewayOptions
+	Gateway GatewayOptions
+	// TLSHosts is the cluster-wide set of hostnames covered by the managed
+	// Gateway listener. When nil, translation falls back to the source
+	// Ingress's own TLS declarations for route-only installations.
+	TLSHosts           map[string]struct{}
 	AllowSnippets      bool
 	Strict             bool
 	SettingsAsSnippets bool

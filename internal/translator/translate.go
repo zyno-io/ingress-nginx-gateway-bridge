@@ -86,7 +86,7 @@ func Translate(
 
 	authProxyHeaders := resolveAuthProxyHeaders(ctx, ing, resolveConfigMap, &plan)
 
-	inputs := collectHosts(ing, &plan)
+	inputs := collectHosts(ing, options, &plan)
 	for _, input := range inputs {
 		route, routeIssues, locationSnippets := buildRoute(ctx, ing, input, options, resolvePort)
 		plan.Issues = append(plan.Issues, routeIssues...)
@@ -217,11 +217,22 @@ func resolveAuthProxyHeaders(
 	return headers
 }
 
-func collectHosts(ing *networkingv1.Ingress, plan *Plan) []hostInput {
-	tlsHosts := make(map[string]struct{})
-	for _, tls := range ing.Spec.TLS {
-		for _, host := range tls.Hosts {
-			tlsHosts[strings.ToLower(strings.TrimSpace(host))] = struct{}{}
+func collectHosts(ing *networkingv1.Ingress, options Options, plan *Plan) []hostInput {
+	tlsHosts := options.TLSHosts
+	if tlsHosts == nil {
+		tlsHosts = make(map[string]struct{})
+		for _, tls := range ing.Spec.TLS {
+			hosts := effectiveTLSHosts(ing, tls)
+			if len(hosts) == 0 {
+				plan.Issues = append(plan.Issues, Issue{
+					Severity: SeverityError,
+					Field:    "spec.tls.hosts",
+					Message:  "TLS entry has no hosts and the Ingress has no named rules from which to infer them",
+				})
+			}
+			for _, host := range hosts {
+				tlsHosts[host] = struct{}{}
+			}
 		}
 	}
 
@@ -833,6 +844,9 @@ func externalAuthSnippets(
 	if signin := strings.TrimSpace(annotations[annAuthSignin]); signin != "" {
 		if nginxUnsafePattern.MatchString(signin) {
 			return "", "", fmt.Errorf("auth-signin contains unsafe characters")
+		}
+		if strings.Contains(signin, "$escaped_request_uri") {
+			return "", "", fmt.Errorf("auth-signin uses ingress-nginx-specific $escaped_request_uri, which NGINX Gateway Fabric does not define")
 		}
 		signinName := "@ngib_signin_" + strings.ReplaceAll(naming.DNSLabel(routeName), "-", "_")
 		fmt.Fprintf(&location, "error_page 401 = %s;\n", signinName)

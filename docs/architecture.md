@@ -26,7 +26,7 @@ Managed mode creates:
 - One shared HTTPS listener containing the distinct TLS Secret references required by selected Ingresses. NGF performs SNI certificate selection.
 - Cross-namespace `ReferenceGrant` objects allowing that Gateway to reference application TLS Secrets.
 
-Rules covered by a wildcard TLS hostname attach to the shared HTTPS listener. Conflicting Secrets for the same hostname are fatal for both source Ingresses. Gateway API limits a listener to 64 certificate references; exceeding that limit is reported as a fatal translation issue rather than creating an invalid Gateway.
+Rules covered by an exact or wildcard TLS hostname attach to the shared HTTPS listener, including sibling Ingresses for the same hostname. When a TLS entry omits `hosts`, the bridge infers the named rules on that Ingress, matching ingress-nginx's merged-host behavior. Conflicting Secrets for the same hostname are fatal for both source Ingresses. Gateway API limits a listener to 64 certificate references; exceeding that limit is reported as a fatal translation issue rather than creating an invalid Gateway.
 
 The bridge owns the managed Gateway specification. It refuses to adopt a pre-existing Gateway unless it already has:
 

@@ -31,6 +31,7 @@ type ManagedGatewayOptions struct {
 type GatewayPlan struct {
 	Gateway         gatewayv1.Gateway
 	ReferenceGrants []gatewayv1.ReferenceGrant
+	TLSHosts        map[string]struct{}
 	Issues          map[types.NamespacedName][]Issue
 }
 
@@ -44,7 +45,10 @@ type certificateSource struct {
 func BuildManagedGateway(ingresses []networkingv1.Ingress, options ManagedGatewayOptions) GatewayPlan {
 	fromAll := gatewayv1.NamespacesFromAll
 	allowedRoutes := &gatewayv1.AllowedRoutes{Namespaces: &gatewayv1.RouteNamespaces{From: &fromAll}}
-	plan := GatewayPlan{Issues: make(map[types.NamespacedName][]Issue)}
+	plan := GatewayPlan{
+		TLSHosts: make(map[string]struct{}),
+		Issues:   make(map[types.NamespacedName][]Issue),
+	}
 	plan.Gateway = gatewayv1.Gateway{
 		TypeMeta: metav1.TypeMeta{APIVersion: gatewayv1.GroupVersion.String(), Kind: "Gateway"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -96,7 +100,16 @@ func BuildManagedGateway(ingresses []networkingv1.Ingress, options ManagedGatewa
 				})
 				continue
 			}
-			for _, rawHost := range tls.Hosts {
+			hosts := effectiveTLSHosts(ing, tls)
+			if len(hosts) == 0 {
+				plan.Issues[source] = append(plan.Issues[source], Issue{
+					Severity: SeverityError,
+					Field:    "spec.tls.hosts",
+					Message:  "TLS entry has no hosts and the Ingress has no named rules from which to infer them",
+				})
+				continue
+			}
+			for _, rawHost := range hosts {
 				host := strings.ToLower(strings.TrimSpace(rawHost))
 				if host == "" {
 					plan.Issues[source] = append(plan.Issues[source], Issue{
@@ -117,6 +130,7 @@ func BuildManagedGateway(ingresses []networkingv1.Ingress, options ManagedGatewa
 					plan.Issues[existing.source] = append(plan.Issues[existing.source], Issue{Severity: SeverityError, Field: "spec.tls", Message: message})
 					continue
 				}
+				plan.TLSHosts[host] = struct{}{}
 				certificates[host] = candidate
 			}
 			certificateRefs[ing.Namespace+"/"+secret] = certificateSource{
@@ -170,6 +184,37 @@ func BuildManagedGateway(ingresses []networkingv1.Ingress, options ManagedGatewa
 		})
 	}
 	return plan
+}
+
+// effectiveTLSHosts reproduces ingress-nginx's behavior for a TLS entry with
+// an omitted hosts list by applying that entry to every named rule on the same
+// Ingress. Hostless/default-backend TLS cannot be projected safely onto the
+// shared hostname listener.
+func effectiveTLSHosts(ing *networkingv1.Ingress, tls networkingv1.IngressTLS) []string {
+	if len(tls.Hosts) > 0 {
+		result := make([]string, 0, len(tls.Hosts))
+		for _, raw := range tls.Hosts {
+			if host := strings.ToLower(strings.TrimSpace(raw)); host != "" {
+				result = append(result, host)
+			}
+		}
+		return result
+	}
+
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(ing.Spec.Rules))
+	for _, rule := range ing.Spec.Rules {
+		host := strings.ToLower(strings.TrimSpace(rule.Host))
+		if host == "" {
+			continue
+		}
+		if _, exists := seen[host]; exists {
+			continue
+		}
+		seen[host] = struct{}{}
+		result = append(result, host)
+	}
+	return result
 }
 
 func certificateReferenceGrant(

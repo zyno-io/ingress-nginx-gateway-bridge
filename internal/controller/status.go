@@ -22,6 +22,8 @@ import (
 	"github.com/zyno-io/ingress-nginx-gateway-bridge/internal/translator"
 )
 
+const nginxGatewayController = gatewayv1.GatewayController("gateway.nginx.org/nginx-gateway-controller")
+
 func (r *IngressReconciler) reconcileTranslationStatus(
 	ctx context.Context,
 	ing *networkingv1.Ingress,
@@ -103,7 +105,7 @@ func (r *IngressReconciler) generatedReady(
 		return metav1.ConditionUnknown, "LookupFailed", "could not read target Gateway", err
 	}
 	programmed := apimeta.FindStatusCondition(gateway.Status.Conditions, string(gatewayv1.GatewayConditionProgrammed))
-	if programmed == nil || programmed.Status == metav1.ConditionUnknown {
+	if programmed == nil || programmed.ObservedGeneration != gateway.Generation || programmed.Status == metav1.ConditionUnknown {
 		return metav1.ConditionUnknown, "GatewayPending", "target Gateway has not reported Programmed", nil
 	}
 	if programmed.Status != metav1.ConditionTrue {
@@ -117,7 +119,7 @@ func (r *IngressReconciler) generatedReady(
 			if err := r.Get(ctx, client.ObjectKeyFromObject(policy), &current); err != nil {
 				return pendingObject("ClientSettingsPolicy", policy.Name, err)
 			}
-			if status, reason, message := attachedPolicyReady("ClientSettingsPolicy", policy.Name, current.Status); status != metav1.ConditionTrue {
+			if status, reason, message := attachedPolicyReady("ClientSettingsPolicy", policy.Name, current.Generation, current.Status); status != metav1.ConditionTrue {
 				return status, reason, message, nil
 			}
 			continue
@@ -126,7 +128,7 @@ func (r *IngressReconciler) generatedReady(
 			if err := r.Get(ctx, client.ObjectKeyFromObject(policy), &current); err != nil {
 				return pendingObject("ProxySettingsPolicy", policy.Name, err)
 			}
-			if status, reason, message := attachedPolicyReady("ProxySettingsPolicy", policy.Name, current.Status); status != metav1.ConditionTrue {
+			if status, reason, message := attachedPolicyReady("ProxySettingsPolicy", policy.Name, current.Generation, current.Status); status != metav1.ConditionTrue {
 				return status, reason, message, nil
 			}
 			continue
@@ -135,7 +137,7 @@ func (r *IngressReconciler) generatedReady(
 			if err := r.Get(ctx, client.ObjectKeyFromObject(policy), &current); err != nil {
 				return pendingObject("AuthenticationFilter", policy.Name, err)
 			}
-			if status, reason, message := extensionFilterReady("AuthenticationFilter", policy.Name, current.Status.Controllers); status != metav1.ConditionTrue {
+			if status, reason, message := extensionFilterReady("AuthenticationFilter", policy.Name, current.Generation, current.Status.Controllers); status != metav1.ConditionTrue {
 				return status, reason, message, nil
 			}
 			continue
@@ -144,7 +146,7 @@ func (r *IngressReconciler) generatedReady(
 			if err := r.Get(ctx, client.ObjectKeyFromObject(policy), &current); err != nil {
 				return pendingObject("SnippetsFilter", policy.Name, err)
 			}
-			if status, reason, message := extensionFilterReady("SnippetsFilter", policy.Name, current.Status.Controllers); status != metav1.ConditionTrue {
+			if status, reason, message := extensionFilterReady("SnippetsFilter", policy.Name, current.Generation, current.Status.Controllers); status != metav1.ConditionTrue {
 				return status, reason, message, nil
 			}
 			continue
@@ -159,6 +161,9 @@ func (r *IngressReconciler) generatedReady(
 			}
 			foundAncestor := false
 			for _, ancestor := range current.Status.Ancestors {
+				if ancestor.ControllerName != nginxGatewayController {
+					continue
+				}
 				if ancestor.AncestorRef.Name != gatewayv1.ObjectName(r.Config.GatewayName) {
 					continue
 				}
@@ -167,14 +172,19 @@ func (r *IngressReconciler) generatedReady(
 				}
 				foundAncestor = true
 				accepted := apimeta.FindStatusCondition(ancestor.Conditions, string(gatewayv1.PolicyConditionAccepted))
-				if accepted == nil {
+				if accepted == nil || accepted.ObservedGeneration != current.Generation {
 					return metav1.ConditionUnknown, "PolicyPending", fmt.Sprintf("BackendTLSPolicy %s has incomplete status", policy.Name), nil
 				}
 				if accepted.Status != metav1.ConditionTrue {
 					return metav1.ConditionFalse, "PolicyRejected", fmt.Sprintf("BackendTLSPolicy %s: %s", policy.Name, accepted.Message), nil
 				}
-				if resolved := apimeta.FindStatusCondition(ancestor.Conditions, "ResolvedRefs"); resolved != nil && resolved.Status != metav1.ConditionTrue {
-					return metav1.ConditionFalse, "PolicyRejected", fmt.Sprintf("BackendTLSPolicy %s: %s", policy.Name, resolved.Message), nil
+				if resolved := apimeta.FindStatusCondition(ancestor.Conditions, "ResolvedRefs"); resolved != nil {
+					if resolved.ObservedGeneration != current.Generation {
+						return metav1.ConditionUnknown, "PolicyPending", fmt.Sprintf("BackendTLSPolicy %s has incomplete status", policy.Name), nil
+					}
+					if resolved.Status != metav1.ConditionTrue {
+						return metav1.ConditionFalse, "PolicyRejected", fmt.Sprintf("BackendTLSPolicy %s: %s", policy.Name, resolved.Message), nil
+					}
 				}
 			}
 			if !foundAncestor {
@@ -195,6 +205,9 @@ func (r *IngressReconciler) generatedReady(
 		}
 		foundParent := false
 		for _, parent := range current.Status.Parents {
+			if parent.ControllerName != nginxGatewayController {
+				continue
+			}
 			if parent.ParentRef.Name != gatewayv1.ObjectName(r.Config.GatewayName) {
 				continue
 			}
@@ -204,7 +217,7 @@ func (r *IngressReconciler) generatedReady(
 			foundParent = true
 			for _, conditionType := range []gatewayv1.RouteConditionType{gatewayv1.RouteConditionAccepted, gatewayv1.RouteConditionResolvedRefs} {
 				condition := apimeta.FindStatusCondition(parent.Conditions, string(conditionType))
-				if condition == nil {
+				if condition == nil || condition.ObservedGeneration != current.Generation {
 					return metav1.ConditionUnknown, "RoutePending", fmt.Sprintf("HTTPRoute %s has incomplete status", route.Name), nil
 				}
 				if condition.Status != metav1.ConditionTrue {
@@ -223,14 +236,17 @@ func pendingObject(kind, name string, err error) (metav1.ConditionStatus, string
 	return metav1.ConditionUnknown, "PolicyPending", fmt.Sprintf("%s %s is not readable yet", kind, name), client.IgnoreNotFound(err)
 }
 
-func attachedPolicyReady(kind, name string, status gatewayv1.PolicyStatus) (metav1.ConditionStatus, string, string) {
+func attachedPolicyReady(kind, name string, generation int64, status gatewayv1.PolicyStatus) (metav1.ConditionStatus, string, string) {
 	if len(status.Ancestors) == 0 {
 		return metav1.ConditionUnknown, "PolicyPending", fmt.Sprintf("%s %s has no ancestor status yet", kind, name)
 	}
 	foundAccepted := false
 	for _, ancestor := range status.Ancestors {
+		if ancestor.ControllerName != nginxGatewayController {
+			continue
+		}
 		accepted := apimeta.FindStatusCondition(ancestor.Conditions, string(gatewayv1.PolicyConditionAccepted))
-		if accepted == nil {
+		if accepted == nil || accepted.ObservedGeneration != generation {
 			continue
 		}
 		if accepted.Status != metav1.ConditionTrue {
@@ -245,7 +261,7 @@ func attachedPolicyReady(kind, name string, status gatewayv1.PolicyStatus) (meta
 }
 
 func extensionFilterReady(
-	kind, name string,
+	kind, name string, generation int64,
 	controllers []ngfv1alpha1.ControllerStatus,
 ) (metav1.ConditionStatus, string, string) {
 	if len(controllers) == 0 {
@@ -253,8 +269,11 @@ func extensionFilterReady(
 	}
 	foundAccepted := false
 	for _, controller := range controllers {
+		if controller.ControllerName != nginxGatewayController {
+			continue
+		}
 		accepted := apimeta.FindStatusCondition(controller.Conditions, "Accepted")
-		if accepted == nil {
+		if accepted == nil || accepted.ObservedGeneration != generation {
 			continue
 		}
 		if accepted.Status != metav1.ConditionTrue {
@@ -285,7 +304,7 @@ func (r *IngressReconciler) mirrorIngressStatus(
 		return client.IgnoreNotFound(err)
 	}
 	programmed := apimeta.FindStatusCondition(gateway.Status.Conditions, string(gatewayv1.GatewayConditionProgrammed))
-	if programmed == nil || programmed.Status != metav1.ConditionTrue || len(gateway.Status.Addresses) == 0 {
+	if programmed == nil || programmed.ObservedGeneration != gateway.Generation || programmed.Status != metav1.ConditionTrue || len(gateway.Status.Addresses) == 0 {
 		return nil
 	}
 	addresses := make([]networkingv1.IngressLoadBalancerIngress, 0, len(gateway.Status.Addresses))
