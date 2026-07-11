@@ -203,12 +203,45 @@ func TestEmptyTLSHostsInferIngressRuleHosts(t *testing.T) {
 	}
 	options := testOptions()
 	options.TLSHosts = plan.TLSHosts
+	options.Gateway.TLSSections = plan.TLSSections
 	translated := Translate(context.Background(), ing, options, nil, nil)
 	if translated.Fatal() {
 		t.Fatalf("plan unexpectedly fatal: %#v", translated.Issues)
 	}
-	if got := string(*translated.HTTPRoutes[0].Spec.ParentRefs[0].SectionName); got != "https" {
-		t.Fatalf("listener = %q, want https", got)
+	wantSection := plan.TLSSections["app.zyno.io"]
+	if got := string(*translated.HTTPRoutes[0].Spec.ParentRefs[0].SectionName); got != wantSection {
+		t.Fatalf("listener = %q, want %q", got, wantSection)
+	}
+}
+
+func TestManagedGatewayUsesHostnameScopedTLSListeners(t *testing.T) {
+	first := testIngress(nil)
+	second := testIngress(nil)
+	second.Name = "second"
+	second.UID = "second-uid"
+	second.Spec.Rules[0].Host = "other.zyno.io"
+	second.Spec.TLS[0].Hosts = []string{"other.zyno.io"}
+	second.Spec.TLS[0].SecretName = "other-tls"
+	plan := BuildManagedGateway([]networkingv1.Ingress{*first, *second}, ManagedGatewayOptions{
+		Namespace: "gateway", Name: "public", ClassName: "nginx", HTTPSectionName: "http", HTTPSSectionName: "https",
+	})
+	if got := len(plan.Gateway.Spec.Listeners); got != 3 {
+		t.Fatalf("listeners = %d, want HTTP plus two hostname-scoped HTTPS listeners", got)
+	}
+	for _, host := range []string{"app.zyno.io", "other.zyno.io"} {
+		section := plan.TLSSections[host]
+		if section == "" {
+			t.Fatalf("missing TLS section for %s", host)
+		}
+		found := false
+		for _, listener := range plan.Gateway.Spec.Listeners {
+			if string(listener.Name) == section && listener.Hostname != nil && string(*listener.Hostname) == host && len(listener.TLS.CertificateRefs) == 1 {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing hostname-scoped listener for %s", host)
+		}
 	}
 }
 

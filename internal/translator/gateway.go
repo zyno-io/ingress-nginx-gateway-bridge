@@ -32,6 +32,7 @@ type GatewayPlan struct {
 	Gateway         gatewayv1.Gateway
 	ReferenceGrants []gatewayv1.ReferenceGrant
 	TLSHosts        map[string]struct{}
+	TLSSections     map[string]string
 	Issues          map[types.NamespacedName][]Issue
 }
 
@@ -46,8 +47,9 @@ func BuildManagedGateway(ingresses []networkingv1.Ingress, options ManagedGatewa
 	fromAll := gatewayv1.NamespacesFromAll
 	allowedRoutes := &gatewayv1.AllowedRoutes{Namespaces: &gatewayv1.RouteNamespaces{From: &fromAll}}
 	plan := GatewayPlan{
-		TLSHosts: make(map[string]struct{}),
-		Issues:   make(map[types.NamespacedName][]Issue),
+		TLSHosts:    make(map[string]struct{}),
+		TLSSections: make(map[string]string),
+		Issues:      make(map[types.NamespacedName][]Issue),
 	}
 	plan.Gateway = gatewayv1.Gateway{
 		TypeMeta: metav1.TypeMeta{APIVersion: gatewayv1.GroupVersion.String(), Kind: "Gateway"},
@@ -80,7 +82,6 @@ func BuildManagedGateway(ingresses []networkingv1.Ingress, options ManagedGatewa
 	}
 
 	certificates := make(map[string]certificateSource)
-	certificateRefs := make(map[string]certificateSource)
 	tlsSources := make(map[types.NamespacedName]struct{})
 	grantKeys := make(map[string]struct{})
 	for idx := range ingresses {
@@ -133,10 +134,6 @@ func BuildManagedGateway(ingresses []networkingv1.Ingress, options ManagedGatewa
 				plan.TLSHosts[host] = struct{}{}
 				certificates[host] = candidate
 			}
-			certificateRefs[ing.Namespace+"/"+secret] = certificateSource{
-				namespace: ing.Namespace, secret: secret, source: source,
-			}
-
 			if ing.Namespace != options.Namespace {
 				key := ing.Namespace + "/" + secret
 				if _, exists := grantKeys[key]; !exists {
@@ -147,38 +144,40 @@ func BuildManagedGateway(ingresses []networkingv1.Ingress, options ManagedGatewa
 		}
 	}
 
-	if len(certificateRefs) > 64 {
+	// Gateway API permits at most 64 listeners. Reserve one for HTTP.
+	if len(certificates) > 63 {
 		for source := range tlsSources {
 			plan.Issues[source] = append(plan.Issues[source], Issue{
 				Severity: SeverityError,
 				Field:    "spec.tls",
-				Message:  "the shared HTTPS listener cannot reference more than 64 distinct TLS Secrets",
+				Message:  "the managed Gateway cannot contain more than 63 TLS hostnames alongside its HTTP listener",
 			})
 		}
 		return plan
 	}
 
-	if len(certificateRefs) > 0 {
-		keys := make([]string, 0, len(certificateRefs))
-		for key := range certificateRefs {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		refs := make([]gatewayv1.SecretObjectReference, 0, len(keys))
-		for _, key := range keys {
-			certificate := certificateRefs[key]
-			secretNamespace := gatewayv1.Namespace(certificate.namespace)
-			refs = append(refs, gatewayv1.SecretObjectReference{
-				Name: gatewayv1.ObjectName(certificate.secret), Namespace: &secretNamespace,
-			})
-		}
-		mode := gatewayv1.TLSModeTerminate
+	hosts := make([]string, 0, len(certificates))
+	for host := range certificates {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	mode := gatewayv1.TLSModeTerminate
+	for _, host := range hosts {
+		certificate := certificates[host]
+		secretNamespace := gatewayv1.Namespace(certificate.namespace)
+		sectionName := naming.DNSLabel(options.HTTPSSectionName, host)
+		plan.TLSSections[host] = sectionName
+		listenerHostname := gatewayv1.Hostname(host)
 		plan.Gateway.Spec.Listeners = append(plan.Gateway.Spec.Listeners, gatewayv1.Listener{
-			Name:     gatewayv1.SectionName(options.HTTPSSectionName),
+			Name:     gatewayv1.SectionName(sectionName),
+			Hostname: &listenerHostname,
 			Port:     443,
 			Protocol: gatewayv1.HTTPSProtocolType,
 			TLS: &gatewayv1.ListenerTLSConfig{
-				Mode: &mode, CertificateRefs: refs,
+				Mode: &mode,
+				CertificateRefs: []gatewayv1.SecretObjectReference{{
+					Name: gatewayv1.ObjectName(certificate.secret), Namespace: &secretNamespace,
+				}},
 			},
 			AllowedRoutes: allowedRoutes,
 		})

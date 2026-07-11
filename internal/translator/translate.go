@@ -41,9 +41,10 @@ type backendTLSConfig struct {
 }
 
 type hostInput struct {
-	hostname    string
-	paths       []networkingv1.HTTPIngressPath
-	tlsHostname string
+	hostname       string
+	paths          []networkingv1.HTTPIngressPath
+	tlsHostname    string
+	tlsSectionName string
 }
 
 // Translate converts one Ingress into same-namespace Gateway API and NGF objects.
@@ -304,8 +305,13 @@ func collectHosts(ing *networkingv1.Ingress, options Options, plan *Plan) []host
 
 	result := make([]hostInput, 0, len(ordered))
 	for _, host := range ordered {
+		tlsHostname := matchingTLSHost(host, tlsHosts)
+		tlsSectionName := options.Gateway.HTTPSSectionName
+		if section, exists := options.Gateway.TLSSections[tlsHostname]; exists {
+			tlsSectionName = section
+		}
 		result = append(result, hostInput{
-			hostname: host, paths: byHost[host], tlsHostname: matchingTLSHost(host, tlsHosts),
+			hostname: host, paths: byHost[host], tlsHostname: tlsHostname, tlsSectionName: tlsSectionName,
 		})
 	}
 	return result
@@ -916,7 +922,11 @@ func applicationParentRefs(
 	attachHTTP bool,
 ) []gatewayv1.ParentReference {
 	tls := input.tlsHostname != ""
-	refs := []gatewayv1.ParentReference{parentRef(namespace, tls, input.hostname, options)}
+	tlsOptions := options
+	if input.tlsSectionName != "" {
+		tlsOptions.HTTPSSectionName = input.tlsSectionName
+	}
+	refs := []gatewayv1.ParentReference{parentRef(namespace, tls, input.hostname, tlsOptions)}
 	if attachHTTP {
 		refs = append(refs, parentRef(namespace, false, input.hostname, options))
 	}

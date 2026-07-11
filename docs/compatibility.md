@@ -41,7 +41,7 @@ The bridge is deliberately implementation-specific. This table describes the cur
 - Backend HTTPS requires ingress-nginx's verified trust annotations; the referenced Secret must contain `ca.crt` and reside in the Ingress namespace. The generated `BackendTLSPolicy` targets the Service, so isolate a Service when different ports require different TLS settings.
 - Non-Service resource backends are rejected.
 - More than 16 paths for one hostname is currently rejected instead of being split across routes.
-- More than 64 distinct frontend TLS Secrets requires splitting traffic across Gateways or future ListenerSet support.
+- More than 63 frontend TLS hostnames requires splitting traffic across Gateways or future ListenerSet support.
 
 ## Verified kube-api edge profile
 

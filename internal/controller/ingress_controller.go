@@ -147,6 +147,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 			return ctrl.Result{}, err
 		}
 		options.TLSHosts = gatewayPlan.TLSHosts
+		options.Gateway.TLSSections = gatewayPlan.TLSSections
 	}
 	settingsAsSnippets, err := r.requiresSettingsSnippets(ctx, &ing)
 	if err != nil {

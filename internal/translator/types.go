@@ -57,6 +57,7 @@ type GatewayOptions struct {
 	Name             string
 	HTTPSectionName  string
 	HTTPSSectionName string
+	TLSSections      map[string]string
 	ManagedListeners bool
 }
 
