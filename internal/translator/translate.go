@@ -36,8 +36,10 @@ type PortResolver func(ctx context.Context, namespace, service, portName string)
 type ConfigMapResolver func(ctx context.Context, namespace, name string) (map[string]string, error)
 
 type backendTLSConfig struct {
+	verified   bool
 	secretName string
 	hostname   string
+	serverName bool
 }
 
 type hostInput struct {
@@ -71,10 +73,7 @@ func Translate(
 		plan.Issues = append(plan.Issues, Issue{
 			Severity: SeverityError,
 			Field:    annBackendProtocol,
-			Message: fmt.Sprintf(
-				"backend protocol %q cannot be reproduced safely yet; NGF requires an explicit BackendTLSPolicy for HTTPS and does not support ingress-nginx's unverified TLS default",
-				protocol,
-			),
+			Message:  fmt.Sprintf("backend protocol %q cannot be reproduced by the current NGF translation", protocol),
 		})
 	}
 	if version := strings.TrimSpace(ing.Annotations[annProxyHTTPVersion]); version != "" && version != "1.1" {
@@ -126,23 +125,53 @@ func checkUnknownAnnotations(ing *networkingv1.Ingress, strict bool, plan *Plan)
 
 func parseBackendTLS(ing *networkingv1.Ingress) (*backendTLSConfig, []Issue) {
 	var issues []Issue
-	verify, verifyErr := parseNginxBool(ing.Annotations[annProxySSLVerify])
-	if verifyErr != nil || !verify {
+	verify := false
+	if raw := strings.TrimSpace(ing.Annotations[annProxySSLVerify]); raw != "" {
+		var err error
+		verify, err = parseNginxBool(raw)
+		if err != nil {
+			issues = append(issues, Issue{Severity: SeverityError, Field: annProxySSLVerify, Message: err.Error()})
+		}
+	}
+	serverNameEnabled := false
+	if raw := strings.TrimSpace(ing.Annotations[annProxySSLServerName]); raw != "" {
+		var err error
+		serverNameEnabled, err = parseNginxBool(raw)
+		if err != nil {
+			issues = append(issues, Issue{Severity: SeverityError, Field: annProxySSLServerName, Message: err.Error()})
+		}
+	}
+	hostname := strings.TrimSpace(ing.Annotations[annProxySSLName])
+	if hostname != "" && len(k8svalidation.IsDNS1123Subdomain(hostname)) > 0 {
 		issues = append(issues, Issue{
 			Severity: SeverityError,
-			Field:    annProxySSLVerify,
-			Message:  "HTTPS backends require proxy-ssl-verify: on; unverified upstream TLS is intentionally unsupported",
+			Field:    annProxySSLName,
+			Message:  "proxy-ssl-name must contain a valid DNS hostname",
 		})
 	}
-	serverNameEnabled, serverNameErr := parseNginxBool(ing.Annotations[annProxySSLServerName])
-	if serverNameErr != nil || !serverNameEnabled {
+
+	secretRef := strings.TrimSpace(ing.Annotations[annProxySSLSecret])
+	if !verify {
+		if secretRef != "" {
+			issues = append(issues, Issue{
+				Severity: SeverityError,
+				Field:    annProxySSLSecret,
+				Message:  "proxy-ssl-secret with verification disabled may configure an upstream client certificate, which is not supported yet",
+			})
+		}
+		if len(issues) > 0 {
+			return nil, issues
+		}
+		return &backendTLSConfig{verified: false, hostname: hostname, serverName: serverNameEnabled}, nil
+	}
+
+	if !serverNameEnabled {
 		issues = append(issues, Issue{
 			Severity: SeverityError,
 			Field:    annProxySSLServerName,
 			Message:  "HTTPS backends require proxy-ssl-server-name: on",
 		})
 	}
-	hostname := strings.TrimSpace(ing.Annotations[annProxySSLName])
 	if errs := k8svalidation.IsDNS1123Subdomain(hostname); hostname == "" || len(errs) > 0 {
 		issues = append(issues, Issue{
 			Severity: SeverityError,
@@ -151,7 +180,6 @@ func parseBackendTLS(ing *networkingv1.Ingress) (*backendTLSConfig, []Issue) {
 		})
 	}
 
-	secretRef := strings.TrimSpace(ing.Annotations[annProxySSLSecret])
 	secretName := secretRef
 	if parts := strings.SplitN(secretRef, "/", 2); len(parts) == 2 {
 		if parts[0] != ing.Namespace {
@@ -173,7 +201,7 @@ func parseBackendTLS(ing *networkingv1.Ingress) (*backendTLSConfig, []Issue) {
 	if len(issues) > 0 {
 		return nil, issues
 	}
-	return &backendTLSConfig{secretName: secretName, hostname: hostname}, nil
+	return &backendTLSConfig{verified: true, secretName: secretName, hostname: hostname, serverName: true}, nil
 }
 
 func resolveAuthProxyHeaders(
@@ -502,7 +530,7 @@ func addPolicies(
 			plan.ProxySettingsPolicies = append(plan.ProxySettingsPolicies, *proxyPolicy)
 		}
 	}
-	if backendTLS != nil {
+	if backendTLS != nil && backendTLS.verified {
 		for _, policy := range buildBackendTLSPolicies(ing, route, *backendTLS) {
 			duplicate := false
 			for _, existing := range plan.BackendTLSPolicies {
@@ -515,6 +543,9 @@ func addPolicies(
 				plan.BackendTLSPolicies = append(plan.BackendTLSPolicies, policy)
 			}
 		}
+	}
+	if backendTLS != nil && !backendTLS.verified {
+		addUnverifiedBackendTLSFilters(ing, route, *backendTLS, labels, plan)
 	}
 
 	authFilter, authIssues := buildBasicAuth(ing, route.Name, labels)
@@ -532,6 +563,67 @@ func addPolicies(
 		plan.SnippetsFilters = append(plan.SnippetsFilters, *snippetFilter)
 		appendExtensionFilter(route, "SnippetsFilter", snippetFilter.Name)
 	}
+}
+
+func addUnverifiedBackendTLSFilters(
+	ing *networkingv1.Ingress,
+	route *gatewayv1.HTTPRoute,
+	config backendTLSConfig,
+	labels map[string]string,
+	plan *Plan,
+) {
+	for idx := range route.Spec.Rules {
+		rule := &route.Spec.Rules[idx]
+		if len(rule.BackendRefs) != 1 || rule.BackendRefs[0].Port == nil {
+			plan.Issues = append(plan.Issues, Issue{
+				Severity: SeverityError,
+				Field:    fmt.Sprintf("spec.rules[%d].backendRefs", idx),
+				Message:  "unverified HTTPS translation requires exactly one Service backend with a numeric port",
+			})
+			continue
+		}
+
+		backend := rule.BackendRefs[0]
+		upstream := fmt.Sprintf("%s_%s_%d", route.Namespace, backend.Name, *backend.Port)
+		requestURI := ""
+		if ruleNeedsOriginalRequestURI(*rule) && strings.TrimSpace(ing.Annotations[annRewriteTarget]) == "" {
+			requestURI = "$request_uri"
+		}
+
+		location := make([]string, 0, 3)
+		if config.serverName {
+			location = append(location, "proxy_ssl_server_name on;")
+		}
+		if config.hostname != "" {
+			location = append(location, "proxy_ssl_name "+config.hostname+";")
+		}
+		location = append(location, fmt.Sprintf(
+			"if ($request_method) {\n  proxy_pass https://%s%s;\n}",
+			upstream,
+			requestURI,
+		))
+
+		filter := ngfv1alpha1.SnippetsFilter{
+			TypeMeta: metav1.TypeMeta{APIVersion: ngfv1alpha1.SchemeGroupVersion.String(), Kind: "SnippetsFilter"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name: naming.DNSLabel(route.Name, "backend-https", strconv.Itoa(idx)), Namespace: ing.Namespace, Labels: labels,
+			},
+			Spec: ngfv1alpha1.SnippetsFilterSpec{Snippets: []ngfv1alpha1.Snippet{{
+				Context: ngfv1alpha1.NginxContextHTTPServerLocation,
+				Value:   strings.Join(location, "\n") + "\n",
+			}}},
+		}
+		plan.SnippetsFilters = append(plan.SnippetsFilters, filter)
+		appendExtensionFilterToRule(rule, "SnippetsFilter", filter.Name)
+	}
+}
+
+func ruleNeedsOriginalRequestURI(rule gatewayv1.HTTPRouteRule) bool {
+	if len(rule.Matches) != 1 {
+		return true
+	}
+	match := rule.Matches[0]
+	return match.Method != nil || len(match.Headers) > 0 || len(match.QueryParams) > 0
 }
 
 func buildSettingsSnippets(ing *networkingv1.Ingress) ([]string, []Issue) {
@@ -972,13 +1064,17 @@ func buildRedirectRoute(ing *networkingv1.Ingress, hostname string, options Opti
 }
 
 func appendExtensionFilter(route *gatewayv1.HTTPRoute, kind, name string) {
-	group := gatewayv1.Group(ngfv1alpha1.SchemeGroupVersion.Group)
 	for idx := range route.Spec.Rules {
-		route.Spec.Rules[idx].Filters = append(route.Spec.Rules[idx].Filters, gatewayv1.HTTPRouteFilter{
-			Type:         gatewayv1.HTTPRouteFilterExtensionRef,
-			ExtensionRef: &gatewayv1.LocalObjectReference{Group: group, Kind: gatewayv1.Kind(kind), Name: gatewayv1.ObjectName(name)},
-		})
+		appendExtensionFilterToRule(&route.Spec.Rules[idx], kind, name)
 	}
+}
+
+func appendExtensionFilterToRule(rule *gatewayv1.HTTPRouteRule, kind, name string) {
+	group := gatewayv1.Group(ngfv1alpha1.SchemeGroupVersion.Group)
+	rule.Filters = append(rule.Filters, gatewayv1.HTTPRouteFilter{
+		Type:         gatewayv1.HTTPRouteFilterExtensionRef,
+		ExtensionRef: &gatewayv1.LocalObjectReference{Group: group, Kind: gatewayv1.Kind(kind), Name: gatewayv1.ObjectName(name)},
+	})
 }
 
 func backendPort(ctx context.Context, namespace string, backend *networkingv1.IngressServiceBackend, resolvePort PortResolver) (int32, error) {

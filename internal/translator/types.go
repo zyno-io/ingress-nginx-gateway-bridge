@@ -48,7 +48,7 @@ type Issue struct {
 	Message  string
 }
 
-// Fatal reports whether any issue prevents safe activation of the generated route.
+// Fatal reports whether any issue prevents faithful activation of the generated route.
 func (i Issue) Fatal() bool { return i.Severity == SeverityError }
 
 // GatewayOptions identifies the parent Gateway and listener ownership mode.
