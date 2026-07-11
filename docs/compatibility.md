@@ -28,7 +28,7 @@ The bridge is deliberately implementation-specific. This table describes the cur
 | `proxy-http-version` | NGF's upstream HTTP/1.1 default | Supported when set to `1.1` |
 | `backend-protocol` set to `HTTP` | Standard Service backend | Supported |
 | `backend-protocol` set to `HTTPS` with `proxy-ssl-verify`, `proxy-ssl-server-name`, `proxy-ssl-name`, and `proxy-ssl-secret` | Gateway API `BackendTLSPolicy` | Supported when verification and SNI are on and the CA Secret is local |
-| `backend-protocol` set to `HTTPS` without `proxy-ssl-verify: on` | Generated location-context `SnippetsFilter` selecting the NGF HTTPS upstream | Supported with ingress-nginx's default certificate verification and SNI behavior; NGF snippets required |
+| `backend-protocol` set to `HTTPS` without `proxy-ssl-verify: on` | Generated location-context `SnippetsFilter` proxying to the HTTPS Kubernetes Service address | Supported with ingress-nginx's default certificate verification and SNI behavior; NGF snippets required |
 | Other `nginx.ingress.kubernetes.io/*` annotations | None | Fatal in strict mode; warning otherwise |
 
 ## Known semantic boundaries
@@ -39,7 +39,7 @@ The bridge is deliberately implementation-specific. This table describes the cur
 - `auth-signin` values must use variables available in standard NGINX/NGF. Ingress-nginx's Lua-provided `$escaped_request_uri` is rejected because substituting `$request_uri` is not equivalent when the value is nested in a redirect query parameter.
 - The supplied `auth-signin` URL is emitted as-is. ingress-nginx implicitly appends an escaped `rd` parameter; NGF lacks ingress-nginx's URI-escaping module, so applications that need a return target should include their own supported redirect parameter in `auth-signin` (the audited Vouch routes already use `url=`).
 - Generated regex rewrites use NGF's regular-expression HTTPRoute matching plus a location snippet.
-- Backend HTTPS with verification disabled uses an NGF-specific generated snippet because Gateway API 1.5 has no skip-verification `BackendTLSPolicy` mode. This deliberately retains ingress-nginx's default `proxy_ssl_verify off` behavior. It depends on NGF 2.6's deterministic upstream naming and requires NGF snippets.
+- Backend HTTPS with verification disabled uses an NGF-specific generated snippet because Gateway API 1.5 has no skip-verification `BackendTLSPolicy` mode. This deliberately retains ingress-nginx's default `proxy_ssl_verify off` behavior and proxies through the stable `service.namespace.svc:port` address. It requires NGF snippets.
 - Verified backend HTTPS requires ingress-nginx's trust annotations; the referenced Secret must contain `ca.crt` and reside in the Ingress namespace. The generated `BackendTLSPolicy` targets the Service, so isolate a Service when different ports require different TLS settings.
 - Non-Service resource backends are rejected.
 - More than 16 paths for one hostname is currently rejected instead of being split across routes.
