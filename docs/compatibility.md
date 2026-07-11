@@ -9,13 +9,13 @@ The bridge is deliberately implementation-specific. This table describes the cur
 | `proxy-read-timeout` | NGF `ProxySettingsPolicy.spec.timeout.read`; generated location snippet for overlapping route families | Supported |
 | `proxy-send-timeout` | NGF `ProxySettingsPolicy.spec.timeout.send`; generated location snippet for overlapping route families | Supported |
 | `proxy-buffering` | NGF `ProxySettingsPolicy.spec.buffering.disable`; generated location snippet for overlapping route families | Supported |
-| `proxy-buffer-size` | NGF `ProxySettingsPolicy.spec.buffering.bufferSize`; generated location snippet for overlapping route families | Supported |
+| `proxy-buffer-size` | NGF `ProxySettingsPolicy.spec.buffering.bufferSize` plus ingress-nginx's default four same-sized response buffers; generated location snippets for overlapping route families | Supported |
 | `proxy-request-buffering` | Generated location-context `SnippetsFilter` | Supported; NGF snippets required |
 | `enable-cors`, `cors-allow-origin`, `cors-allow-methods`, `cors-allow-headers`, `cors-expose-headers`, `cors-allow-credentials`, `cors-max-age` | Gateway API 1.5 `CORS` filter | Supported; NGF returns `200` for successful preflight where ingress-nginx returns `204` |
 | `canary`, `canary-by-header`, `canary-by-header-value` | `HTTPRouteMatch.headers` | Supported as a complete header/value set |
 | `rewrite-target` | `URLRewrite` for literal paths; generated rewrite snippet for capture groups | Supported; captures require NGF snippets |
 | `ssl-redirect` | Separate HTTP `RequestRedirect` route | Supported |
-| `upstream-vhost` | `RequestHeaderModifier` setting `Host` | Supported |
+| `upstream-vhost` | NGF location snippet setting the upstream `Host` header | Supported |
 | `server-alias` | Additional hostname-specific HTTPRoutes | Supported; aliases not covered by TLS remain HTTP-only |
 | `auth-type` set to `basic` and `auth-secret` | NGF `AuthenticationFilter` | Supported; NGF's default realm is `Authentication Required` when `auth-realm` is omitted |
 | `auth-url` | Generated internal auth location and `auth_request` `SnippetsFilter` | Supported; NGF snippets required |

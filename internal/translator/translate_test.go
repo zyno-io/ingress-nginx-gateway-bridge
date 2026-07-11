@@ -34,15 +34,36 @@ func TestTranslateCommonAnnotations(t *testing.T) {
 	if len(plan.ClientSettingsPolicies) != 1 || len(plan.ProxySettingsPolicies) != 1 {
 		t.Fatalf("expected client and proxy policies, got %#v", plan)
 	}
+	if len(plan.SnippetsFilters) != 1 || !strings.Contains(plan.SnippetsFilters[0].Spec.Snippets[0].Value, "proxy_set_header Host backend.zyno.io;") {
+		t.Fatalf("upstream-vhost was not translated to an NGF location snippet: %#v", plan.SnippetsFilters)
+	}
 	application := plan.HTTPRoutes[0]
 	if got := string(*application.Spec.ParentRefs[0].SectionName); got != "https" {
 		t.Fatalf("parent section = %q", got)
 	}
 	if len(application.Spec.Rules[0].Filters) != 2 {
-		t.Fatalf("filters = %d, want CORS + host modifier", len(application.Spec.Rules[0].Filters))
+		t.Fatalf("filters = %d, want CORS + SnippetsFilter", len(application.Spec.Rules[0].Filters))
 	}
 	if application.Spec.Rules[0].Filters[0].Type != gatewayv1.HTTPRouteFilterCORS {
 		t.Fatalf("first filter = %s, want CORS", application.Spec.Rules[0].Filters[0].Type)
+	}
+	if application.Spec.Rules[0].Filters[1].ExtensionRef == nil || application.Spec.Rules[0].Filters[1].ExtensionRef.Kind != "SnippetsFilter" {
+		t.Fatalf("second filter does not reference the upstream-vhost SnippetsFilter: %#v", application.Spec.Rules[0].Filters[1])
+	}
+}
+
+func TestProxyBufferSizePreservesIngressNginxBufferRelationship(t *testing.T) {
+	ing := testIngress(map[string]string{annProxyBufferSize: "16k"})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if plan.Fatal() || len(plan.ProxySettingsPolicies) != 1 {
+		t.Fatalf("proxy-buffer-size was not translated: %#v", plan)
+	}
+	buffering := plan.ProxySettingsPolicies[0].Spec.Buffering
+	if buffering == nil || buffering.BufferSize == nil || *buffering.BufferSize != "16k" {
+		t.Fatalf("buffer size = %#v, want 16k", buffering)
+	}
+	if buffering.Buffers == nil || buffering.Buffers.Number != 4 || buffering.Buffers.Size != "16k" {
+		t.Fatalf("proxy buffers = %#v, want ingress-nginx default 4 16k", buffering.Buffers)
 	}
 }
 

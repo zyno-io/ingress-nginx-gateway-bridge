@@ -462,13 +462,6 @@ func buildRule(
 	} else {
 		issues = append(issues, corsIssues...)
 	}
-	if host := strings.TrimSpace(ing.Annotations[annUpstreamVHost]); host != "" {
-		rule.Filters = append(rule.Filters, gatewayv1.HTTPRouteFilter{
-			Type:                  gatewayv1.HTTPRouteFilterRequestHeaderModifier,
-			RequestHeaderModifier: &gatewayv1.HTTPHeaderFilter{Set: []gatewayv1.HTTPHeader{{Name: "Host", Value: host}}},
-		})
-	}
-
 	var rewriteSnippet string
 	if target := strings.TrimSpace(ing.Annotations[annRewriteTarget]); target != "" {
 		if strings.Contains(target, "$") {
@@ -668,6 +661,7 @@ func buildSettingsSnippets(ing *networkingv1.Ingress) ([]string, []Issue) {
 			issues = append(issues, Issue{Severity: SeverityError, Field: annProxyBufferSize, Message: "value is not supported by NGINX proxy_buffer_size"})
 		} else {
 			snippets = append(snippets, "proxy_buffer_size "+value+";")
+			snippets = append(snippets, "proxy_buffers 4 "+value+";")
 		}
 	}
 	return snippets, issues
@@ -713,10 +707,12 @@ func buildProxyPolicy(
 		if !nginxSizePattern.MatchString(raw) {
 			issues = append(issues, Issue{Severity: SeverityError, Field: annProxyBufferSize, Message: "value is not supported by NGF ProxySettingsPolicy"})
 		} else {
-			buffering.BufferSize = ptr(ngfv1alpha1.Size(raw))
+			size := ngfv1alpha1.Size(raw)
+			buffering.BufferSize = ptr(size)
+			buffering.Buffers = &ngfv1alpha1.ProxyBuffers{Number: 4, Size: size}
 		}
 	}
-	if buffering.Disable != nil || buffering.BufferSize != nil {
+	if buffering.Disable != nil || buffering.BufferSize != nil || buffering.Buffers != nil {
 		settings.Buffering = buffering
 	}
 	if settings.Timeout == nil && settings.Buffering == nil {
@@ -815,6 +811,14 @@ func buildSnippets(
 	var issues []Issue
 	var server, location []string
 	location = append(location, generatedLocationSnippets...)
+
+	if host := strings.TrimSpace(ing.Annotations[annUpstreamVHost]); host != "" {
+		if nginxUnsafePattern.MatchString(host) || strings.ContainsAny(host, " \t") {
+			issues = append(issues, Issue{Severity: SeverityError, Field: annUpstreamVHost, Message: "value contains characters unsafe for generated NGINX configuration"})
+		} else {
+			location = append(location, "proxy_set_header Host "+host+";")
+		}
+	}
 
 	authSnippet := strings.TrimSpace(ing.Annotations[annAuthSnippet])
 	if authSnippet != "" {
