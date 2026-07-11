@@ -60,6 +60,7 @@ func (r *IngressReconciler) reconcileTranslationStatus(
 		GeneratedResources: generatedReferences(desired),
 		Issues:             statusIssues(plan.Issues),
 	}
+	labelValue := translator.TranslationStatusFailed
 	now := metav1.Now()
 	if plan.Fatal() {
 		apimeta.SetStatusCondition(&status.Conditions, metav1.Condition{
@@ -79,18 +80,47 @@ func (r *IngressReconciler) reconcileTranslationStatus(
 		if err != nil {
 			return err
 		}
+		labelValue = translationStatusLabelValue(readyStatus)
 		apimeta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type: "Ready", Status: readyStatus, Reason: reason, Message: message,
 			ObservedGeneration: ing.Generation, LastTransitionTime: now,
 		})
 	}
 
-	if equality.Semantic.DeepEqual(translation.Status, status) {
+	if !equality.Semantic.DeepEqual(translation.Status, status) {
+		before := translation.DeepCopy()
+		translation.Status = status
+		if err := r.Status().Patch(ctx, translation, client.MergeFrom(before)); err != nil {
+			return err
+		}
+	}
+	return r.patchIngressTranslationLabel(ctx, ing, labelValue)
+}
+
+func translationStatusLabelValue(ready metav1.ConditionStatus) string {
+	if ready == metav1.ConditionTrue {
+		return translator.TranslationStatusReady
+	}
+	if ready == metav1.ConditionUnknown {
+		return translator.TranslationStatusPending
+	}
+	return translator.TranslationStatusFailed
+}
+
+func (r *IngressReconciler) patchIngressTranslationLabel(
+	ctx context.Context,
+	ing *networkingv1.Ingress,
+	value string,
+) error {
+	if ing.Labels[translator.TranslationStatusLabel] == value {
 		return nil
 	}
-	before := translation.DeepCopy()
-	translation.Status = status
-	return r.Status().Patch(ctx, translation, client.MergeFrom(before))
+	before := ing.DeepCopy()
+	if ing.Labels == nil {
+		ing.Labels = make(map[string]string)
+	}
+	ing.Labels[translator.TranslationStatusLabel] = value
+	return r.Patch(ctx, ing, client.MergeFrom(before))
 }
 
 func (r *IngressReconciler) generatedReady(

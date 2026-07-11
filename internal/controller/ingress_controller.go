@@ -91,9 +91,10 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 				return ctrl.Result{}, err
 			}
 		}
-		if controllerutil.ContainsFinalizer(&ing, finalizerName) {
+		if controllerutil.ContainsFinalizer(&ing, finalizerName) || ing.Labels[translator.TranslationStatusLabel] != "" {
 			before := ing.DeepCopy()
 			controllerutil.RemoveFinalizer(&ing, finalizerName)
+			delete(ing.Labels, translator.TranslationStatusLabel)
 			if err := r.Patch(ctx, &ing, client.MergeFrom(before)); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -110,9 +111,10 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 				return ctrl.Result{}, err
 			}
 		}
-		if controllerutil.ContainsFinalizer(&ing, finalizerName) {
+		if controllerutil.ContainsFinalizer(&ing, finalizerName) || ing.Labels[translator.TranslationStatusLabel] != "" {
 			before := ing.DeepCopy()
 			controllerutil.RemoveFinalizer(&ing, finalizerName)
+			delete(ing.Labels, translator.TranslationStatusLabel)
 			if err := r.Patch(ctx, &ing, client.MergeFrom(before)); err != nil {
 				return ctrl.Result{}, err
 			}

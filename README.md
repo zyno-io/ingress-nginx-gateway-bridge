@@ -47,6 +47,7 @@ Selection can be changed with Helm values or flags. `gateway.zyno.io/enabled: "t
 - Updates prune stale generated resources.
 - Deletion is protected by a finalizer so managed Gateway listeners are removed.
 - `IngressTranslation` exposes `Translated` and `Ready` conditions plus field-level issues, including rejected NGF policies and filters.
+- Selected source Ingresses carry `gateway.zyno.io/translation-status=ready|pending|failed` for direct filtering; detailed status remains on `IngressTranslation`.
 - Source-provided NGINX snippets are disabled by default.
 - The shared Gateway is reconciled serially and once at startup, including when no Ingress is currently selected.
 
@@ -91,6 +92,7 @@ Inspect every translation before switching traffic:
 kubectl get ingresstranslations.gateway.zyno.io -A
 kubectl get ingresstranslations.gateway.zyno.io -A \
   -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,TRANSLATED:.status.conditions[0].status,READY:.status.conditions[1].status,ISSUES:.status.issues[*].message'
+kubectl get ingress -A -l gateway.zyno.io/translation-status=failed
 ```
 
 See [the hot-swap runbook](docs/hot-swap.md) before using the controller alongside ingress-nginx.

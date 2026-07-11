@@ -11,14 +11,21 @@ import (
 )
 
 const (
-	ManagedByLabel       = "gateway.zyno.io/managed-by"
-	SourceNameLabel      = "gateway.zyno.io/source-name"
-	SourceNamespaceLabel = "gateway.zyno.io/source-namespace"
-	SourceUIDLabel       = "gateway.zyno.io/source-uid"
-	GatewayLabel         = "gateway.zyno.io/gateway"
-	ControllerName       = "ingress-nginx-gateway-bridge"
-	EnabledAnnotation    = "gateway.zyno.io/enabled"
-	IgnoreAnnotation     = "gateway.zyno.io/ignore"
+	ManagedByLabel         = "gateway.zyno.io/managed-by"
+	SourceNameLabel        = "gateway.zyno.io/source-name"
+	SourceNamespaceLabel   = "gateway.zyno.io/source-namespace"
+	SourceUIDLabel         = "gateway.zyno.io/source-uid"
+	GatewayLabel           = "gateway.zyno.io/gateway"
+	TranslationStatusLabel = "gateway.zyno.io/translation-status"
+	ControllerName         = "ingress-nginx-gateway-bridge"
+	EnabledAnnotation      = "gateway.zyno.io/enabled"
+	IgnoreAnnotation       = "gateway.zyno.io/ignore"
+)
+
+const (
+	TranslationStatusReady   = "ready"
+	TranslationStatusPending = "pending"
+	TranslationStatusFailed  = "failed"
 )
 
 // SourceNameLabelValue returns a valid label value for an Ingress name.
