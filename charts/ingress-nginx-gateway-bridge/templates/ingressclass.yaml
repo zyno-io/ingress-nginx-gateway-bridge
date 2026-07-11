@@ -1,0 +1,14 @@
+{{- if .Values.ingressClass.create }}
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: {{ .Values.ingressClass.name }}
+  labels:
+    {{- include "ingress-nginx-gateway-bridge.labels" . | nindent 4 }}
+  {{- if .Values.ingressClass.isDefaultClass }}
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "true"
+  {{- end }}
+spec:
+  controller: gateway.zyno.io/ingress-nginx-gateway-bridge
+{{- end }}

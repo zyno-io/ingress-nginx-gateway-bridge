@@ -1,0 +1,53 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ingress-nginx-gateway-bridge.fullname" . }}
+  labels:
+    {{- include "ingress-nginx-gateway-bridge.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes", "referencegrants", "backendtlspolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["gateway.nginx.org"]
+    resources:
+      - clientsettingspolicies
+      - proxysettingspolicies
+      - authenticationfilters
+      - snippetsfilters
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["gateway.zyno.io"]
+    resources: ["ingresstranslations"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["gateway.zyno.io"]
+    resources: ["ingresstranslations/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ingress-nginx-gateway-bridge.fullname" . }}
+  labels:
+    {{- include "ingress-nginx-gateway-bridge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ingress-nginx-gateway-bridge.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ingress-nginx-gateway-bridge.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

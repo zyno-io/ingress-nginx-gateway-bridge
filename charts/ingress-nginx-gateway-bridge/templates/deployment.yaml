@@ -1,0 +1,89 @@
+{{- $ingressClasses := .Values.controller.ingressClasses }}
+{{- if .Values.ingressClass.create }}
+{{- $ingressClasses = append $ingressClasses .Values.ingressClass.name }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ingress-nginx-gateway-bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ingress-nginx-gateway-bridge.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ingress-nginx-gateway-bridge.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
+      labels:
+        {{- include "ingress-nginx-gateway-bridge.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ingress-nginx-gateway-bridge.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --gateway-namespace={{ include "ingress-nginx-gateway-bridge.gatewayNamespace" . }}
+            - --gateway-name={{ .Values.controller.gateway.name }}
+            - --gateway-class-name={{ .Values.controller.gateway.className }}
+            - --nginx-proxy-name={{ .Values.controller.gateway.nginxProxyName }}
+            - --manage-gateway={{ .Values.controller.gateway.manage }}
+            - --http-section-name={{ .Values.controller.gateway.httpSectionName }}
+            - --https-section-name={{ .Values.controller.gateway.httpsSectionName }}
+            - --watch-ingress-without-class={{ .Values.controller.watchIngressWithoutClass }}
+            - --ingress-classes={{ join "," (uniq $ingressClasses) }}
+            - --strict={{ .Values.controller.strict }}
+            - --update-ingress-status={{ .Values.controller.updateIngressStatus }}
+            - --allow-snippets={{ .Values.controller.allowSnippets }}
+            - --leader-elect={{ .Values.controller.leaderElect }}
+            - --metrics-bind-address={{ ternary ":8080" "0" .Values.metrics.enabled }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
