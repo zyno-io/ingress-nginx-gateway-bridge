@@ -126,8 +126,8 @@ func TestTranslateUnverifiedHTTPSBackend(t *testing.T) {
 		t.Fatalf("unexpected HTTPS translation objects: %#v", plan)
 	}
 	got := plan.SnippetsFilters[0].Spec.Snippets[0].Value
-	if !strings.Contains(got, "proxy_pass https://apps_app_8080;") {
-		t.Fatalf("unverified HTTPS snippet does not select the NGF upstream:\n%s", got)
+	if !strings.Contains(got, "proxy_pass https://app.apps.svc:8080;") {
+		t.Fatalf("unverified HTTPS snippet does not select the Kubernetes Service:\n%s", got)
 	}
 	if strings.Contains(got, "proxy_ssl_verify") || strings.Contains(got, "proxy_ssl_server_name") {
 		t.Fatalf("default ingress-nginx TLS verification/SNI behavior was not preserved:\n%s", got)

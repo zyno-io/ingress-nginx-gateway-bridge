@@ -584,7 +584,7 @@ func addUnverifiedBackendTLSFilters(
 		}
 
 		backend := rule.BackendRefs[0]
-		upstream := fmt.Sprintf("%s_%s_%d", route.Namespace, backend.Name, *backend.Port)
+		serviceAddress := fmt.Sprintf("%s.%s.svc:%d", backend.Name, route.Namespace, *backend.Port)
 		requestURI := ""
 		if ruleNeedsOriginalRequestURI(*rule) && strings.TrimSpace(ing.Annotations[annRewriteTarget]) == "" {
 			requestURI = "$request_uri"
@@ -599,7 +599,7 @@ func addUnverifiedBackendTLSFilters(
 		}
 		location = append(location, fmt.Sprintf(
 			"if ($request_method) {\n  proxy_pass https://%s%s;\n}",
-			upstream,
+			serviceAddress,
 			requestURI,
 		))
 
