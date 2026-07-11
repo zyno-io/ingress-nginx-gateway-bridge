@@ -203,6 +203,21 @@ func TestCaptureRewriteUsesGeneratedSnippet(t *testing.T) {
 	}
 }
 
+func TestCaptureRewriteOverridesPrefixPathType(t *testing.T) {
+	ing := testIngress(map[string]string{annRewriteTarget: "/$1"})
+	prefix := networkingv1.PathTypePrefix
+	ing.Spec.Rules[0].HTTP.Paths[0].Path = `/secret/(.+)`
+	ing.Spec.Rules[0].HTTP.Paths[0].PathType = &prefix
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if plan.Fatal() || len(plan.SnippetsFilters) != 1 {
+		t.Fatalf("capture rewrite was not translated: %#v", plan)
+	}
+	match := plan.HTTPRoutes[0].Spec.Rules[0].Matches[0]
+	if *match.Path.Type != gatewayv1.PathMatchRegularExpression {
+		t.Fatalf("path type = %s, want RegularExpression", *match.Path.Type)
+	}
+}
+
 func TestBuildManagedGatewayReportsTLSConflict(t *testing.T) {
 	first := testIngress(nil)
 	second := testIngress(nil)

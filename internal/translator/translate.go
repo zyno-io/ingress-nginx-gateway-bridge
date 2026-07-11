@@ -415,10 +415,13 @@ func buildRule(
 		case networkingv1.PathTypePrefix:
 			matchType = gatewayv1.PathMatchPathPrefix
 		case networkingv1.PathTypeImplementationSpecific:
-			if parseBool(ing.Annotations[annUseRegex]) || strings.Contains(ing.Annotations[annRewriteTarget], "$") {
-				matchType = gatewayv1.PathMatchRegularExpression
-			}
 		}
+	}
+	// ingress-nginx renders capture-group rewrite locations as regular
+	// expressions even when the Ingress declares pathType: Prefix. Preserve
+	// that behavior so the generated rewrite snippet is actually reachable.
+	if parseBool(ing.Annotations[annUseRegex]) || strings.Contains(ing.Annotations[annRewriteTarget], "$") {
+		matchType = gatewayv1.PathMatchRegularExpression
 	}
 
 	match := gatewayv1.HTTPRouteMatch{
