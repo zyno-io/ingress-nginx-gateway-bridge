@@ -64,7 +64,7 @@ func (r *IngressReconciler) reconcileTranslationStatus(
 	if plan.Fatal() {
 		apimeta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type: "Translated", Status: metav1.ConditionFalse, Reason: "UnsupportedIngress",
-			Message: "one or more Ingress fields cannot be reproduced safely", ObservedGeneration: ing.Generation, LastTransitionTime: now,
+			Message: "one or more Ingress fields cannot be reproduced faithfully", ObservedGeneration: ing.Generation, LastTransitionTime: now,
 		})
 		apimeta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type: "Ready", Status: metav1.ConditionFalse, Reason: "TranslationFailed",

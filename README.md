@@ -7,7 +7,7 @@
 The bridge continuously projects selected Kubernetes `Ingress` objects into `HTTPRoute`, `Gateway`, and NGINX Gateway Fabric policy/filter resources. The original Ingress remains the source of truth until the application is migrated to native Gateway API resources.
 
 > [!CAUTION]
-> This project is an implementation-specific migration bridge, not a new general-purpose Ingress implementation. Translation is strict by default: a route is removed when its behavior cannot be reproduced safely.
+> This project is an implementation-specific migration bridge, not a new general-purpose Ingress implementation. Translation is strict by default: a route is removed when its ingress-nginx behavior cannot be reproduced faithfully.
 
 ## Why it exists
 
@@ -58,7 +58,7 @@ See [the compatibility matrix](docs/compatibility.md) for annotation-level behav
 - Gateway API 1.5 CRDs
 - NGINX Gateway Fabric 2.6.x
 - An NGF `GatewayClass` (the default expected name is `nginx`)
-- NGF snippets enabled when using external auth, capture-group rewrites, request-buffering overrides, or source snippets:
+- NGF snippets enabled when using unverified HTTPS backends, external auth, capture-group rewrites, request-buffering overrides, or source snippets:
 
 ```yaml
 nginxGateway:

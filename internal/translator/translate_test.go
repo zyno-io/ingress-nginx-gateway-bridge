@@ -116,11 +116,43 @@ func TestTranslateVerifiedHTTPSBackend(t *testing.T) {
 	}
 }
 
-func TestTranslateRejectsUnverifiedHTTPSBackend(t *testing.T) {
+func TestTranslateUnverifiedHTTPSBackend(t *testing.T) {
 	ing := testIngress(map[string]string{annBackendProtocol: "HTTPS"})
 	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
-	if !plan.Fatal() {
-		t.Fatal("unverified HTTPS backend was accepted")
+	if plan.Fatal() {
+		t.Fatalf("unverified HTTPS backend was rejected: %#v", plan.Issues)
+	}
+	if len(plan.BackendTLSPolicies) != 0 || len(plan.SnippetsFilters) != 1 {
+		t.Fatalf("unexpected HTTPS translation objects: %#v", plan)
+	}
+	got := plan.SnippetsFilters[0].Spec.Snippets[0].Value
+	if !strings.Contains(got, "proxy_pass https://apps_app_8080;") {
+		t.Fatalf("unverified HTTPS snippet does not select the NGF upstream:\n%s", got)
+	}
+	if strings.Contains(got, "proxy_ssl_verify") || strings.Contains(got, "proxy_ssl_server_name") {
+		t.Fatalf("default ingress-nginx TLS verification/SNI behavior was not preserved:\n%s", got)
+	}
+	filters := plan.HTTPRoutes[0].Spec.Rules[0].Filters
+	if len(filters) == 0 || filters[len(filters)-1].ExtensionRef == nil || filters[len(filters)-1].ExtensionRef.Kind != "SnippetsFilter" {
+		t.Fatalf("HTTPS SnippetsFilter was not attached to its route rule: %#v", filters)
+	}
+}
+
+func TestTranslateUnverifiedHTTPSBackendWithSNI(t *testing.T) {
+	ing := testIngress(map[string]string{
+		annBackendProtocol:    "HTTPS",
+		annProxySSLServerName: "on",
+		annProxySSLName:       "backend.example.com",
+	})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if plan.Fatal() || len(plan.SnippetsFilters) != 1 {
+		t.Fatalf("unverified HTTPS backend with SNI was not translated: %#v", plan)
+	}
+	got := plan.SnippetsFilters[0].Spec.Snippets[0].Value
+	for _, expected := range []string{"proxy_ssl_server_name on;", "proxy_ssl_name backend.example.com;"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("HTTPS snippet does not contain %q:\n%s", expected, got)
+		}
 	}
 }
 
