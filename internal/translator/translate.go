@@ -377,6 +377,9 @@ func buildRoute(
 
 	var issues []Issue
 	var locationSnippets []string
+	if parseBool(ing.Annotations[annEnableCORS]) {
+		locationSnippets = append(locationSnippets, corsUpstreamHeaderSuppressionSnippet)
+	}
 	if len(input.paths) > 16 {
 		issues = append(issues, Issue{
 			Severity: SeverityError,
@@ -487,6 +490,13 @@ func buildRule(
 
 	return rule, issues, rewriteSnippet
 }
+
+const corsUpstreamHeaderSuppressionSnippet = `proxy_hide_header Access-Control-Allow-Origin;
+proxy_hide_header Access-Control-Allow-Credentials;
+proxy_hide_header Access-Control-Allow-Methods;
+proxy_hide_header Access-Control-Allow-Headers;
+proxy_hide_header Access-Control-Expose-Headers;
+proxy_hide_header Access-Control-Max-Age;`
 
 func addPolicies(
 	ing *networkingv1.Ingress,

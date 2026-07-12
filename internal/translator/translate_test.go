@@ -52,6 +52,31 @@ func TestTranslateCommonAnnotations(t *testing.T) {
 	}
 }
 
+func TestCORSHidesUpstreamResponseHeaders(t *testing.T) {
+	ing := testIngress(map[string]string{annEnableCORS: "true"})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if plan.Fatal() || len(plan.SnippetsFilters) != 1 {
+		t.Fatalf("CORS upstream response headers were not suppressed: %#v", plan)
+	}
+	got := plan.SnippetsFilters[0].Spec.Snippets[0].Value
+	for _, header := range []string{
+		"Access-Control-Allow-Origin",
+		"Access-Control-Allow-Credentials",
+		"Access-Control-Allow-Methods",
+		"Access-Control-Allow-Headers",
+		"Access-Control-Expose-Headers",
+		"Access-Control-Max-Age",
+	} {
+		if !strings.Contains(got, "proxy_hide_header "+header+";") {
+			t.Fatalf("CORS compatibility snippet does not hide %s:\n%s", header, got)
+		}
+	}
+	application := plan.HTTPRoutes[0]
+	if len(application.Spec.Rules[0].Filters) != 2 || application.Spec.Rules[0].Filters[0].Type != gatewayv1.HTTPRouteFilterCORS {
+		t.Fatalf("CORS and compatibility filters were not both attached: %#v", application.Spec.Rules[0].Filters)
+	}
+}
+
 func TestProxyBufferSizePreservesIngressNginxBufferRelationship(t *testing.T) {
 	ing := testIngress(map[string]string{annProxyBufferSize: "16k"})
 	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
