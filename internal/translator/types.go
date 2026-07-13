@@ -5,6 +5,7 @@ package translator
 
 import (
 	ngfv1alpha1 "github.com/nginx/nginx-gateway-fabric/v2/apis/v1alpha1"
+	networkingv1 "k8s.io/api/networking/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/zyno-io/ingress-nginx-gateway-bridge/internal/naming"
@@ -78,6 +79,10 @@ type Options struct {
 	AllowSnippets      bool
 	Strict             bool
 	SettingsAsSnippets bool
+	// CanaryIngresses contains header canaries whose rules are consolidated
+	// into the primary Ingress's HTTPRoute. ingress-nginx inherits all
+	// supported non-canary annotations from the primary Ingress.
+	CanaryIngresses []networkingv1.Ingress
 }
 
 // Plan contains all namespaced objects derived from one Ingress.
@@ -89,6 +94,10 @@ type Plan struct {
 	AuthenticationFilters  []ngfv1alpha1.AuthenticationFilter
 	SnippetsFilters        []ngfv1alpha1.SnippetsFilter
 	Issues                 []Issue
+	// DelegatedTo names the primary Ingress that owns this canary's generated
+	// resources. The controller uses it to mirror readiness without creating a
+	// second, conflicting route family.
+	DelegatedTo string
 }
 
 // Fatal reports whether the plan must not be activated.

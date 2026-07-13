@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -120,6 +121,208 @@ func TestTranslateExternalAuth(t *testing.T) {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("generated external auth snippets do not contain %q:\n%s", expected, joined)
 		}
+	}
+}
+
+func TestTranslateConsolidatesCanaryAndProtectsExternalAuthBodySize(t *testing.T) {
+	primary := testIngress(map[string]string{
+		annProxyBodySize: "8m",
+		annAuthURL:       "http://auth.apps.svc.cluster.local:8080/authz",
+	})
+	canary := testIngress(map[string]string{
+		annCanary:              "true",
+		annCanaryByHeader:      "x-zyno-debug",
+		annCanaryByHeaderValue: "true",
+		// ingress-nginx ignores this and inherits the primary setting.
+		annProxyBodySize: "1m",
+	})
+	canary.Name = "app-debug"
+	canary.UID = types.UID("app-debug-uid")
+	canary.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name = "app-debug"
+
+	options := testOptions()
+	options.CanaryIngresses = []networkingv1.Ingress{*canary}
+	plan := Translate(context.Background(), primary, options, nil, nil)
+	if plan.Fatal() {
+		t.Fatalf("consolidated canary plan unexpectedly fatal: %#v", plan.Issues)
+	}
+	if len(plan.HTTPRoutes) != 2 {
+		t.Fatalf("HTTPRoutes = %d, want one application route and one redirect", len(plan.HTTPRoutes))
+	}
+	route := plan.HTTPRoutes[0]
+	if len(route.Spec.Rules) != 2 {
+		t.Fatalf("application route rules = %d, want primary and canary", len(route.Spec.Rules))
+	}
+	if got := route.Spec.Rules[0].BackendRefs[0].Name; got != "app" {
+		t.Fatalf("primary backend = %q, want app", got)
+	}
+	canaryRule := route.Spec.Rules[1]
+	if got := canaryRule.BackendRefs[0].Name; got != "app-debug" {
+		t.Fatalf("canary backend = %q, want app-debug", got)
+	}
+	if len(canaryRule.Matches) != 1 || len(canaryRule.Matches[0].Headers) != 1 {
+		t.Fatalf("canary rule does not contain one header match: %#v", canaryRule.Matches)
+	}
+	header := canaryRule.Matches[0].Headers[0]
+	if header.Name != "x-zyno-debug" || header.Value != "true" {
+		t.Fatalf("canary header match = %#v", header)
+	}
+	if len(plan.ClientSettingsPolicies) != 1 || plan.ClientSettingsPolicies[0].Spec.Body == nil ||
+		plan.ClientSettingsPolicies[0].Spec.Body.MaxSize == nil || *plan.ClientSettingsPolicies[0].Spec.Body.MaxSize != "8m" {
+		t.Fatalf("primary body policy was not inherited by the combined route: %#v", plan.ClientSettingsPolicies)
+	}
+	if len(plan.SnippetsFilters) != 1 {
+		t.Fatalf("external auth SnippetsFilter count = %d, want 1", len(plan.SnippetsFilters))
+	}
+	serverSnippet := ""
+	for _, snippet := range plan.SnippetsFilters[0].Spec.Snippets {
+		if snippet.Context == "http.server" {
+			serverSnippet = snippet.Value
+		}
+	}
+	if !strings.Contains(serverSnippet, "location = /_ngib_auth_") || !strings.Contains(serverSnippet, "  client_max_body_size 8m;") {
+		t.Fatalf("external auth location does not carry the primary body limit:\n%s", serverSnippet)
+	}
+}
+
+func TestTranslateConsolidatesMultiPathPublicCanary(t *testing.T) {
+	primary := testIngress(map[string]string{annProxyBodySize: "4m"})
+	pathType := networkingv1.PathTypePrefix
+	paths := []networkingv1.HTTPIngressPath{
+		{
+			Path: "/public", PathType: &pathType,
+			Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
+				Name: "app", Port: networkingv1.ServiceBackendPort{Number: 8080},
+			}},
+		},
+		{
+			Path: "/embedded", PathType: &pathType,
+			Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
+				Name: "app", Port: networkingv1.ServiceBackendPort{Number: 8080},
+			}},
+		},
+		{
+			Path: "/healthz", PathType: &pathType,
+			Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
+				Name: "app", Port: networkingv1.ServiceBackendPort{Number: 8080},
+			}},
+		},
+	}
+	primary.Spec.Rules[0].HTTP.Paths = paths
+	canary := primary.DeepCopy()
+	canary.Name = "app-public-debug"
+	canary.Annotations = map[string]string{
+		annCanary: "true", annCanaryByHeader: "x-zyno-debug", annCanaryByHeaderValue: "true",
+	}
+	for idx := range canary.Spec.Rules[0].HTTP.Paths {
+		canary.Spec.Rules[0].HTTP.Paths[idx].Backend.Service.Name = "app-debug"
+	}
+	options := testOptions()
+	options.CanaryIngresses = []networkingv1.Ingress{*canary}
+	plan := Translate(context.Background(), primary, options, nil, nil)
+	if plan.Fatal() {
+		t.Fatalf("multi-path canary plan unexpectedly fatal: %#v", plan.Issues)
+	}
+	route := plan.HTTPRoutes[0]
+	if len(route.Spec.Rules) != 6 {
+		t.Fatalf("combined route rules = %d, want three primary and three canary rules", len(route.Spec.Rules))
+	}
+	for idx := 3; idx < 6; idx++ {
+		rule := route.Spec.Rules[idx]
+		if rule.BackendRefs[0].Name != "app-debug" || len(rule.Matches[0].Headers) != 1 {
+			t.Fatalf("rule %d is not a debug header canary: %#v", idx, rule)
+		}
+	}
+	if len(plan.ClientSettingsPolicies) != 1 || *plan.ClientSettingsPolicies[0].Spec.Body.MaxSize != "4m" {
+		t.Fatalf("combined route does not have the primary 4m body policy: %#v", plan.ClientSettingsPolicies)
+	}
+}
+
+func TestOverlappingNonCanaryBodySizeFailsInsteadOfEmittingIneffectiveSnippet(t *testing.T) {
+	ing := testIngress(map[string]string{annProxyBodySize: "8m"})
+	options := testOptions()
+	options.SettingsAsSnippets = true
+	plan := Translate(context.Background(), ing, options, nil, nil)
+	if !plan.Fatal() {
+		t.Fatalf("overlapping non-canary body size was accepted: %#v", plan)
+	}
+	if len(plan.ClientSettingsPolicies) != 0 {
+		t.Fatalf("unexpected ClientSettingsPolicy: %#v", plan.ClientSettingsPolicies)
+	}
+	for _, filter := range plan.SnippetsFilters {
+		for _, snippet := range filter.Spec.Snippets {
+			if strings.Contains(snippet.Value, "client_max_body_size") {
+				t.Fatalf("ineffective body-size snippet was emitted:\n%s", snippet.Value)
+			}
+		}
+	}
+}
+
+func TestValidateCanaryRejectsUnsupportedAndInvalidHeaderModes(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{
+			name: "missing header value",
+			annotations: map[string]string{
+				annCanary: "true", annCanaryByHeader: "x-zyno-debug",
+			},
+		},
+		{
+			name: "invalid header",
+			annotations: map[string]string{
+				annCanary: "true", annCanaryByHeader: "bad header", annCanaryByHeaderValue: "true",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ing := testIngress(test.annotations)
+			issues := ValidateCanary(ing)
+			if len(issues) != 1 || !issues[0].Fatal() {
+				t.Fatalf("ValidateCanary() = %#v, want one fatal issue", issues)
+			}
+		})
+	}
+}
+
+func TestValidateCanaryRejectsCatchAllBackend(t *testing.T) {
+	ing := testIngress(map[string]string{
+		annCanary: "true", annCanaryByHeader: "x-zyno-debug", annCanaryByHeaderValue: "true",
+	})
+	ing.Spec.DefaultBackend = ing.Spec.Rules[0].HTTP.Paths[0].Backend.DeepCopy()
+	issues := ValidateCanary(ing)
+	if len(issues) != 1 || !issues[0].Fatal() || issues[0].Field != "spec.defaultBackend" {
+		t.Fatalf("ValidateCanary() = %#v, want one fatal default-backend issue", issues)
+	}
+}
+
+func TestTranslateRejectsMultipleCanariesForOneRule(t *testing.T) {
+	primary := testIngress(nil)
+	first := testIngress(map[string]string{
+		annCanary: "true", annCanaryByHeader: "x-zyno-debug", annCanaryByHeaderValue: "first",
+	})
+	first.Name = "first-canary"
+	second := testIngress(map[string]string{
+		annCanary: "true", annCanaryByHeader: "x-zyno-debug", annCanaryByHeaderValue: "second",
+	})
+	second.Name = "second-canary"
+	options := testOptions()
+	options.CanaryIngresses = []networkingv1.Ingress{*first, *second}
+	plan := Translate(context.Background(), primary, options, nil, nil)
+	if !plan.Fatal() {
+		t.Fatalf("multiple canaries for one rule were accepted: %#v", plan)
+	}
+}
+
+func TestTranslateRejectsResourceBackendWithoutPanicking(t *testing.T) {
+	ing := testIngress(nil)
+	ing.Spec.Rules[0].HTTP.Paths[0].Backend = networkingv1.IngressBackend{
+		Resource: &corev1.TypedLocalObjectReference{Kind: "StorageBucket", Name: "assets"},
+	}
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if !plan.Fatal() {
+		t.Fatalf("resource backend was accepted: %#v", plan)
 	}
 }
 

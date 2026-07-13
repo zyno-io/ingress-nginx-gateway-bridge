@@ -50,9 +50,9 @@ func (r *IngressReconciler) reconcileTranslationStatus(
 	if err := r.apply(ctx, translation); err != nil {
 		return err
 	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(translation), translation); err != nil {
-		return err
-	}
+	// Patch decodes the API server response back into translation, including
+	// existing status. Reading it again through the informer cache can race a
+	// newly created object and cause a needless NotFound reconciliation error.
 
 	status := bridgev1alpha1.IngressTranslationStatus{
 		ObservedGeneration: ing.Generation,
@@ -76,7 +76,14 @@ func (r *IngressReconciler) reconcileTranslationStatus(
 			Type: "Translated", Status: metav1.ConditionTrue, Reason: "TranslationSucceeded",
 			Message: "Ingress was translated without fatal compatibility issues", ObservedGeneration: ing.Generation, LastTransitionTime: now,
 		})
-		readyStatus, reason, message, err := r.generatedReady(ctx, desired)
+		var readyStatus metav1.ConditionStatus
+		var reason, message string
+		var err error
+		if plan.DelegatedTo != "" {
+			readyStatus, reason, message, err = r.delegatedReady(ctx, ing.Namespace, plan.DelegatedTo)
+		} else {
+			readyStatus, reason, message, err = r.generatedReady(ctx, desired)
+		}
 		if err != nil {
 			return err
 		}
@@ -95,6 +102,42 @@ func (r *IngressReconciler) reconcileTranslationStatus(
 		}
 	}
 	return r.patchIngressTranslationLabel(ctx, ing, labelValue)
+}
+
+func (r *IngressReconciler) delegatedReady(
+	ctx context.Context,
+	namespace, primaryName string,
+) (metav1.ConditionStatus, string, string, error) {
+	var primary networkingv1.Ingress
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: primaryName}, &primary); err != nil {
+		if apierrors.IsNotFound(err) {
+			return metav1.ConditionUnknown, "DelegatedRoutePending", fmt.Sprintf("primary Ingress %s does not exist", primaryName), nil
+		}
+		return metav1.ConditionUnknown, "LookupFailed", "could not read primary Ingress", err
+	}
+
+	var translation bridgev1alpha1.IngressTranslation
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: primaryName}, &translation); err != nil {
+		if apierrors.IsNotFound(err) {
+			return metav1.ConditionUnknown, "DelegatedRoutePending", fmt.Sprintf("primary IngressTranslation %s does not exist yet", primaryName), nil
+		}
+		return metav1.ConditionUnknown, "LookupFailed", "could not read primary IngressTranslation", err
+	}
+	if translation.Status.ObservedGeneration != primary.Generation {
+		return metav1.ConditionUnknown, "DelegatedRoutePending", fmt.Sprintf("primary IngressTranslation %s has not observed generation %d", primaryName, primary.Generation), nil
+	}
+	ready := apimeta.FindStatusCondition(translation.Status.Conditions, "Ready")
+	if ready == nil || ready.ObservedGeneration != primary.Generation {
+		return metav1.ConditionUnknown, "DelegatedRoutePending", fmt.Sprintf("primary IngressTranslation %s has incomplete readiness status", primaryName), nil
+	}
+	switch ready.Status {
+	case metav1.ConditionTrue:
+		return metav1.ConditionTrue, "Delegated", fmt.Sprintf("routing is consolidated into Ready primary Ingress %s", primaryName), nil
+	case metav1.ConditionFalse:
+		return metav1.ConditionFalse, "DelegatedRouteNotReady", fmt.Sprintf("primary IngressTranslation %s is not Ready: %s", primaryName, ready.Message), nil
+	default:
+		return metav1.ConditionUnknown, "DelegatedRoutePending", fmt.Sprintf("primary IngressTranslation %s is pending: %s", primaryName, ready.Message), nil
+	}
 }
 
 func translationStatusLabelValue(ready metav1.ConditionStatus) string {

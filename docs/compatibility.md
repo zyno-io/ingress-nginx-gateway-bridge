@@ -4,7 +4,7 @@ The bridge is deliberately implementation-specific. This table describes the cur
 
 | ingress-nginx annotation | Translation | Status |
 |---|---|---|
-| `proxy-body-size` | NGF `ClientSettingsPolicy.spec.body.maxSize`; generated location snippet for overlapping route families | Supported |
+| `proxy-body-size` | NGF `ClientSettingsPolicy.spec.body.maxSize`; the same limit is added to generated external-auth subrequest locations | Supported; header canaries are consolidated into the primary route so one policy covers both backends |
 | `proxy-connect-timeout` | NGF `ProxySettingsPolicy.spec.timeout.connect`; generated location snippet for overlapping route families | Supported |
 | `proxy-read-timeout` | NGF `ProxySettingsPolicy.spec.timeout.read`; generated location snippet for overlapping route families | Supported |
 | `proxy-send-timeout` | NGF `ProxySettingsPolicy.spec.timeout.send`; generated location snippet for overlapping route families | Supported |
@@ -33,8 +33,8 @@ The bridge is deliberately implementation-specific. This table describes the cur
 
 ## Known semantic boundaries
 
-- Header-based canaries rely on Gateway API match precedence. Weight- and cookie-based canaries are not yet implemented.
-- NGF snippets must be enabled when overlapping route families use client or proxy setting annotations. This avoids NGF's route-attached-policy `TargetConflict` rule while retaining the more-specific header match.
+- Header-based canaries are consolidated into the corresponding primary Ingress's `HTTPRoute` and rely on Gateway API match precedence. As in ingress-nginx, supported non-canary annotations on the canary Ingress are ignored and inherited from the primary. Catch-all and multiple canaries for the same rule are rejected. Weight- and cookie-based canaries are not yet implemented.
+- NGF rejects route-attached policies when separate routes overlap. Header canaries avoid that conflict through route consolidation. Other overlapping route families continue to use snippets for proxy settings, but `proxy-body-size` is rejected rather than translated into an ineffective location snippet.
 - Source snippets are intentionally not parsed or rewritten. They are copied only after the operator enables the privileged compatibility mode.
 - `auth-signin` values must use variables available in standard NGINX/NGF. Ingress-nginx's Lua-provided `$escaped_request_uri` is rejected because substituting `$request_uri` is not equivalent when the value is nested in a redirect query parameter.
 - The supplied `auth-signin` URL is emitted as-is. ingress-nginx implicitly appends an escaped `rd` parameter; NGF lacks ingress-nginx's URI-escaping module, so applications that need a return target should include their own supported redirect parameter in `auth-signin` (the audited Vouch routes already use `url=`).
