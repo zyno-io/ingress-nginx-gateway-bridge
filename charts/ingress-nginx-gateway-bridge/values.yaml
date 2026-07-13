@@ -24,6 +24,9 @@ controller:
     # routes use ExternalName Services so NGF has a DNS resolver.
     nginxProxyName: ""
     manage: true
+    # Permit platform-owned ListenerSets in the Gateway namespace to add
+    # non-Ingress listeners such as SNI-based TLS passthrough.
+    allowListenerSets: false
     httpSectionName: http
     # Shared HTTPS listener name.
     httpsSectionName: https

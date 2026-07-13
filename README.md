@@ -106,6 +106,7 @@ See [the hot-swap runbook](docs/hot-swap.md) before using the controller alongsi
 | `controller.gateway.name` | `ingress-nginx` | Target Gateway name |
 | `controller.gateway.className` | `nginx` | GatewayClass for a managed Gateway |
 | `controller.gateway.nginxProxyName` | empty | Optional same-namespace NGF `NginxProxy` parameters resource; required for `ExternalName` backends |
+| `controller.gateway.allowListenerSets` | `false` | Allow platform-owned `ListenerSet` resources from the managed Gateway namespace |
 | `controller.watchIngressWithoutClass` | `true` | Include classless Ingresses |
 | `controller.ingressClasses` | `[nginx]` | Additional selected Ingress class names |
 | `controller.strict` | `true` | Reject unknown ingress-nginx annotations |

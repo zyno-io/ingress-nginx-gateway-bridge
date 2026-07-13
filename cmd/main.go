@@ -45,6 +45,7 @@ func main() {
 	flag.StringVar(&config.GatewayClassName, "gateway-class-name", "nginx", "GatewayClass used when --manage-gateway is enabled.")
 	flag.StringVar(&config.NginxProxyName, "nginx-proxy-name", "", "Optional same-namespace NginxProxy referenced by a managed Gateway (required for ExternalName Service DNS resolution).")
 	flag.BoolVar(&config.ManageGateway, "manage-gateway", true, "Create the target Gateway and derive its listeners from selected Ingresses.")
+	flag.BoolVar(&config.AllowListenerSets, "allow-listener-sets", false, "Allow ListenerSets from the managed Gateway's namespace.")
 	flag.StringVar(&config.HTTPSectionName, "http-section-name", "http", "HTTP listener section name.")
 	flag.StringVar(&config.HTTPSSectionName, "https-section-name", "https", "HTTPS listener section name used in route-only mode.")
 	flag.BoolVar(&config.WatchIngressWithoutClass, "watch-ingress-without-class", true, "Translate Ingresses with no class.")
@@ -105,6 +106,7 @@ func main() {
 	setupLog.Info("starting controller",
 		"gateway", config.GatewayNamespace+"/"+config.GatewayName,
 		"manageGateway", config.ManageGateway,
+		"allowListenerSets", config.AllowListenerSets,
 		"watchClassless", config.WatchIngressWithoutClass,
 		"ingressClasses", ingressClasses,
 		"strict", config.Strict,

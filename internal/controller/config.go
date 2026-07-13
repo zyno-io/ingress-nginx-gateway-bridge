@@ -13,13 +13,14 @@ import (
 
 // Config controls the controller's source selection and target Gateway.
 type Config struct {
-	GatewayNamespace string
-	GatewayName      string
-	GatewayClassName string
-	NginxProxyName   string
-	ManageGateway    bool
-	HTTPSectionName  string
-	HTTPSSectionName string
+	GatewayNamespace  string
+	GatewayName       string
+	GatewayClassName  string
+	NginxProxyName    string
+	ManageGateway     bool
+	AllowListenerSets bool
+	HTTPSectionName   string
+	HTTPSSectionName  string
 
 	WatchIngressWithoutClass bool
 	IngressClasses           map[string]struct{}

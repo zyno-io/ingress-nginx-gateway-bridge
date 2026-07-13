@@ -260,6 +260,20 @@ func TestBuildManagedGatewayReportsTLSConflict(t *testing.T) {
 	}
 }
 
+func TestManagedGatewayCanAllowSameNamespaceListenerSets(t *testing.T) {
+	plan := BuildManagedGateway(nil, ManagedGatewayOptions{
+		Namespace: "gateway", Name: "public", ClassName: "nginx", AllowListenerSets: true,
+		HTTPSectionName: "http", HTTPSSectionName: "https",
+	})
+	if plan.Gateway.Spec.AllowedListeners == nil || plan.Gateway.Spec.AllowedListeners.Namespaces == nil ||
+		plan.Gateway.Spec.AllowedListeners.Namespaces.From == nil {
+		t.Fatal("managed Gateway does not allow ListenerSets")
+	}
+	if got := *plan.Gateway.Spec.AllowedListeners.Namespaces.From; got != gatewayv1.NamespacesFromSame {
+		t.Fatalf("ListenerSet namespaces = %q, want %q", got, gatewayv1.NamespacesFromSame)
+	}
+}
+
 func TestWildcardTLSSelectsWildcardListener(t *testing.T) {
 	ing := testIngress(nil)
 	ing.Spec.Rules[0].Host = "app.example.com"

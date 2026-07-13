@@ -199,12 +199,13 @@ func (r *IngressReconciler) reconcileManagedGateway(ctx context.Context) (transl
 		}
 	}
 	plan := translator.BuildManagedGateway(selected, translator.ManagedGatewayOptions{
-		Namespace:        r.Config.GatewayNamespace,
-		Name:             r.Config.GatewayName,
-		ClassName:        r.Config.GatewayClassName,
-		NginxProxyName:   r.Config.NginxProxyName,
-		HTTPSectionName:  r.Config.HTTPSectionName,
-		HTTPSSectionName: r.Config.HTTPSSectionName,
+		Namespace:         r.Config.GatewayNamespace,
+		Name:              r.Config.GatewayName,
+		ClassName:         r.Config.GatewayClassName,
+		NginxProxyName:    r.Config.NginxProxyName,
+		AllowListenerSets: r.Config.AllowListenerSets,
+		HTTPSectionName:   r.Config.HTTPSectionName,
+		HTTPSSectionName:  r.Config.HTTPSSectionName,
 	})
 	if err := r.apply(ctx, &plan.Gateway); err != nil {
 		return plan, err

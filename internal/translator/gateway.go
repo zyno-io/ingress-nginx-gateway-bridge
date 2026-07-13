@@ -19,12 +19,13 @@ import (
 
 // ManagedGatewayOptions controls the shared Gateway generated in hot-swap mode.
 type ManagedGatewayOptions struct {
-	Namespace        string
-	Name             string
-	ClassName        string
-	NginxProxyName   string
-	HTTPSectionName  string
-	HTTPSSectionName string
+	Namespace         string
+	Name              string
+	ClassName         string
+	NginxProxyName    string
+	AllowListenerSets bool
+	HTTPSectionName   string
+	HTTPSSectionName  string
 }
 
 // GatewayPlan is the cluster-wide listener projection of all selected Ingresses.
@@ -78,6 +79,12 @@ func BuildManagedGateway(ingresses []networkingv1.Ingress, options ManagedGatewa
 				Kind:  "NginxProxy",
 				Name:  options.NginxProxyName,
 			},
+		}
+	}
+	if options.AllowListenerSets {
+		fromSame := gatewayv1.NamespacesFromSame
+		plan.Gateway.Spec.AllowedListeners = &gatewayv1.AllowedListeners{
+			Namespaces: &gatewayv1.ListenerNamespaces{From: &fromSame},
 		}
 	}
 
