@@ -151,12 +151,57 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 		options.TLSHosts = gatewayPlan.TLSHosts
 		options.Gateway.TLSSections = gatewayPlan.TLSSections
 	}
-	settingsAsSnippets, err := r.requiresSettingsSnippets(ctx, &ing)
-	if err != nil {
+	var namespaceIngresses networkingv1.IngressList
+	if err := r.List(ctx, &namespaceIngresses, client.InNamespace(ing.Namespace)); err != nil {
 		return ctrl.Result{}, err
 	}
-	options.SettingsAsSnippets = settingsAsSnippets
-	plan := translator.Translate(ctx, &ing, options, r.resolveServicePort, r.resolveConfigMap)
+	selectedIngresses := make([]networkingv1.Ingress, 0, len(namespaceIngresses.Items))
+	for idx := range namespaceIngresses.Items {
+		candidate := &namespaceIngresses.Items[idx]
+		if candidate.DeletionTimestamp.IsZero() && r.Config.Selected(candidate) {
+			selectedIngresses = append(selectedIngresses, *candidate.DeepCopy())
+		}
+	}
+	assignments := canaryAssignments(selectedIngresses)
+
+	var plan translator.Plan
+	if isCanaryIngress(&ing) {
+		plan.Issues = append(plan.Issues, translator.ValidateCanary(&ing)...)
+		primaryName, found := assignments[ing.Name]
+		if !found {
+			plan.Issues = append(plan.Issues, translator.Issue{
+				Severity: translator.SeverityError,
+				Field:    ingressNginxCanaryAnnotation,
+				Message:  "canary Ingress has no corresponding selected primary Ingress with the same hostname and paths",
+			})
+		} else {
+			plan.DelegatedTo = primaryName
+			plan.Issues = append(plan.Issues, translator.Issue{
+				Severity: translator.SeverityWarning,
+				Field:    ingressNginxCanaryAnnotation,
+				Message:  fmt.Sprintf("canary routing is consolidated into primary Ingress %s", primaryName),
+			})
+		}
+	} else {
+		excludedOverlaps := make(map[string]struct{})
+		for idx := range selectedIngresses {
+			candidate := &selectedIngresses[idx]
+			if assignments[candidate.Name] != ing.Name {
+				continue
+			}
+			options.CanaryIngresses = append(options.CanaryIngresses, *candidate.DeepCopy())
+			excludedOverlaps[candidate.Name] = struct{}{}
+		}
+		sort.Slice(options.CanaryIngresses, func(i, j int) bool {
+			return options.CanaryIngresses[i].Name < options.CanaryIngresses[j].Name
+		})
+		settingsAsSnippets, err := r.requiresSettingsSnippets(ctx, &ing, excludedOverlaps)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		options.SettingsAsSnippets = settingsAsSnippets
+		plan = translator.Translate(ctx, &ing, options, r.resolveServicePort, r.resolveConfigMap)
+	}
 	if r.Config.ManageGateway {
 		plan.Issues = append(plan.Issues, gatewayPlan.Issues[request.NamespacedName]...)
 	}
@@ -179,7 +224,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 	if err := r.reconcileTranslationStatus(ctx, &ing, plan, desired); err != nil {
 		return ctrl.Result{}, err
 	}
-	if r.Config.UpdateIngressStatus && !plan.Fatal() {
+	if r.Config.UpdateIngressStatus && !plan.Fatal() && plan.DelegatedTo == "" {
 		if err := r.mirrorIngressStatus(ctx, &ing, desired); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -382,9 +427,19 @@ func (r *IngressReconciler) serviceToIngresses(ctx context.Context, object clien
 	if err := r.List(ctx, &ingresses, client.InNamespace(service.Namespace)); err != nil {
 		return nil
 	}
-	requests := make([]ctrl.Request, 0)
+	referenced := false
 	for idx := range ingresses.Items {
-		if ingressReferencesService(&ingresses.Items[idx], service.Name) {
+		if r.Config.Selected(&ingresses.Items[idx]) && ingressReferencesService(&ingresses.Items[idx], service.Name) {
+			referenced = true
+			break
+		}
+	}
+	if !referenced {
+		return nil
+	}
+	requests := make([]ctrl.Request, 0, len(ingresses.Items))
+	for idx := range ingresses.Items {
+		if r.Config.Selected(&ingresses.Items[idx]) {
 			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&ingresses.Items[idx])})
 		}
 	}
@@ -462,7 +517,42 @@ func (r *IngressReconciler) ingressToNamespaceIngresses(ctx context.Context, obj
 	return requests
 }
 
-func (r *IngressReconciler) requiresSettingsSnippets(ctx context.Context, ingress *networkingv1.Ingress) (bool, error) {
+func (r *IngressReconciler) translationToCanaries(ctx context.Context, object client.Object) []ctrl.Request {
+	translation, ok := object.(*bridgev1alpha1.IngressTranslation)
+	if !ok {
+		return nil
+	}
+	var ingresses networkingv1.IngressList
+	if err := r.List(ctx, &ingresses, client.InNamespace(translation.Namespace)); err != nil {
+		return nil
+	}
+	selected := make([]networkingv1.Ingress, 0, len(ingresses.Items))
+	for idx := range ingresses.Items {
+		if r.Config.Selected(&ingresses.Items[idx]) && ingresses.Items[idx].DeletionTimestamp.IsZero() {
+			selected = append(selected, *ingresses.Items[idx].DeepCopy())
+		}
+	}
+	assignments := canaryAssignments(selected)
+	requests := make([]ctrl.Request, 0)
+	for canaryName, primaryName := range assignments {
+		if primaryName == translation.Name {
+			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+				Namespace: translation.Namespace,
+				Name:      canaryName,
+			}})
+		}
+	}
+	sort.Slice(requests, func(i, j int) bool {
+		return requests[i].String() < requests[j].String()
+	})
+	return requests
+}
+
+func (r *IngressReconciler) requiresSettingsSnippets(
+	ctx context.Context,
+	ingress *networkingv1.Ingress,
+	excludedNames map[string]struct{},
+) (bool, error) {
 	var ingresses networkingv1.IngressList
 	if err := r.List(ctx, &ingresses, client.InNamespace(ingress.Namespace)); err != nil {
 		return false, err
@@ -471,6 +561,9 @@ func (r *IngressReconciler) requiresSettingsSnippets(ctx context.Context, ingres
 	for idx := range ingresses.Items {
 		candidate := &ingresses.Items[idx]
 		if candidate.Name == ingress.Name || !candidate.DeletionTimestamp.IsZero() || !r.Config.Selected(candidate) {
+			continue
+		}
+		if _, excluded := excludedNames[candidate.Name]; excluded {
 			continue
 		}
 		for footprint := range ingressRouteFootprints(candidate) {
@@ -559,6 +652,7 @@ func (r *IngressReconciler) SetupWithManager(manager ctrl.Manager) error {
 		Owns(&ngfv1alpha1.AuthenticationFilter{}).
 		Owns(&ngfv1alpha1.SnippetsFilter{}).
 		Owns(&bridgev1alpha1.IngressTranslation{}).
+		Watches(&bridgev1alpha1.IngressTranslation{}, handler.EnqueueRequestsFromMapFunc(r.translationToCanaries)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.serviceToIngresses)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.configMapToIngresses)).
 		Watches(&gatewayv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(r.gatewayToIngresses)).

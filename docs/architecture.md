@@ -54,7 +54,7 @@ Gateway API `ReferenceGrant` can restrict the source namespace and kind but not 
 
 Status mirroring waits until the complete translation reports ready, the Gateway reports `Programmed=True`, and the Gateway has at least one address. This preserves the previous ingress-nginx address during NGF provisioning or route/policy rejection instead of clearing or switching it prematurely.
 
-NGF rejects a route-attached policy when another route has the same Gateway, hostname, port, and path but is not targeted by that same policy. The bridge detects these overlapping route families (including header canaries) and emits the client/proxy settings as generated `SnippetsFilter` directives for every affected Ingress. Non-overlapping routes continue to use `ClientSettingsPolicy` and `ProxySettingsPolicy`.
+NGF rejects a route-attached policy when another route has the same Gateway, hostname, port, and path but is not targeted by that same policy. The bridge consolidates a header canary into its corresponding primary Ingress's `HTTPRoute`, allowing one `ClientSettingsPolicy` and `ProxySettingsPolicy` to cover both rules. The consolidated route is owned by the primary Ingress; the canary's `IngressTranslation` records that delegation and follows the primary translation's readiness. Other overlapping route families use generated snippets for proxy settings, while `proxy-body-size` is rejected because a route-location snippet cannot raise the limit early enough in NGF's request dispatch.
 
 Services are watched so named Service port mutations retrigger translation. ConfigMaps referenced by `auth-proxy-set-headers` are also watched.
 

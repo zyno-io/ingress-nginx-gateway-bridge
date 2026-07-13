@@ -49,6 +49,11 @@ type hostInput struct {
 	tlsSectionName string
 }
 
+type canaryHostInput struct {
+	ingress networkingv1.Ingress
+	input   hostInput
+}
+
 // Translate converts one Ingress into same-namespace Gateway API and NGF objects.
 func Translate(
 	ctx context.Context,
@@ -59,6 +64,7 @@ func Translate(
 ) Plan {
 	plan := Plan{}
 	checkUnknownAnnotations(ing, options.Strict, &plan)
+	plan.Issues = append(plan.Issues, ValidateCanary(ing)...)
 
 	protocol := strings.ToUpper(strings.TrimSpace(ing.Annotations[annBackendProtocol]))
 	if protocol == "" {
@@ -86,10 +92,53 @@ func Translate(
 
 	authProxyHeaders := resolveAuthProxyHeaders(ctx, ing, resolveConfigMap, &plan)
 
+	canariesByHost := make(map[string][]canaryHostInput)
+	canaryFootprints := make(map[string]string)
+	for idx := range options.CanaryIngresses {
+		plan.Issues = append(plan.Issues, ValidateCanary(&options.CanaryIngresses[idx])...)
+		canary := inheritedCanaryIngress(ing, &options.CanaryIngresses[idx])
+		for _, input := range collectHosts(&canary, options, &plan) {
+			for _, path := range input.paths {
+				pathValue := path.Path
+				if pathValue == "" {
+					pathValue = "/"
+				}
+				footprint := input.hostname + "\x00" + pathValue
+				if existing, found := canaryFootprints[footprint]; found && existing != canary.Name {
+					plan.Issues = append(plan.Issues, Issue{
+						Severity: SeverityError,
+						Field:    annCanary,
+						Message:  fmt.Sprintf("canary Ingresses %s and %s target the same hostname and path; ingress-nginx permits only one canary per rule", existing, canary.Name),
+					})
+				} else {
+					canaryFootprints[footprint] = canary.Name
+				}
+			}
+			canariesByHost[input.hostname] = append(canariesByHost[input.hostname], canaryHostInput{
+				ingress: canary,
+				input:   input,
+			})
+		}
+	}
+
 	inputs := collectHosts(ing, options, &plan)
 	for _, input := range inputs {
 		route, routeIssues, locationSnippets := buildRoute(ctx, ing, input, options, resolvePort)
 		plan.Issues = append(plan.Issues, routeIssues...)
+		for _, canary := range canariesByHost[input.hostname] {
+			for _, path := range canary.input.paths {
+				rule, ruleIssues, _ := buildRule(ctx, &canary.ingress, path, len(route.Spec.Rules), resolvePort)
+				plan.Issues = append(plan.Issues, ruleIssues...)
+				route.Spec.Rules = append(route.Spec.Rules, rule)
+			}
+		}
+		if len(route.Spec.Rules) > 16 {
+			plan.Issues = append(plan.Issues, Issue{
+				Severity: SeverityError,
+				Field:    "spec.rules.paths",
+				Message:  "a generated HTTPRoute cannot contain more than 16 primary and canary rules",
+			})
+		}
 		plan.HTTPRoutes = append(plan.HTTPRoutes, route)
 
 		addPolicies(ing, &route, locationSnippets, authProxyHeaders, backendTLS, options, &plan)
@@ -101,6 +150,58 @@ func Translate(
 	}
 
 	return plan
+}
+
+func inheritedCanaryIngress(primary, canary *networkingv1.Ingress) networkingv1.Ingress {
+	effective := *canary.DeepCopy()
+	effective.Annotations = make(map[string]string, len(primary.Annotations)+3)
+	for key, value := range primary.Annotations {
+		effective.Annotations[key] = value
+	}
+	for _, annotation := range []string{annCanary, annCanaryByHeader, annCanaryByHeaderValue} {
+		if value, exists := canary.Annotations[annotation]; exists {
+			effective.Annotations[annotation] = value
+		} else {
+			delete(effective.Annotations, annotation)
+		}
+	}
+	return effective
+}
+
+// ValidateCanary reports whether an Ingress uses the header/value canary mode
+// that the bridge can reproduce faithfully.
+func ValidateCanary(ing *networkingv1.Ingress) []Issue {
+	if !parseBool(ing.Annotations[annCanary]) {
+		return nil
+	}
+	_, issues := headerCanaryMatch(ing.Annotations)
+	if ing.Spec.DefaultBackend != nil {
+		issues = append(issues, Issue{
+			Severity: SeverityError,
+			Field:    "spec.defaultBackend",
+			Message:  "a canary cannot be used as a catch-all default backend",
+		})
+	}
+	return issues
+}
+
+func headerCanaryMatch(annotations map[string]string) (*gatewayv1.HTTPHeaderMatch, []Issue) {
+	header := strings.TrimSpace(annotations[annCanaryByHeader])
+	value := strings.TrimSpace(annotations[annCanaryByHeaderValue])
+	if header == "" || value == "" {
+		return nil, []Issue{{
+			Severity: SeverityError,
+			Field:    annCanary,
+			Message:  "only header/value canaries are currently supported; both canary-by-header and canary-by-header-value are required",
+		}}
+	}
+	if !validHeaderName(header) {
+		return nil, []Issue{{Severity: SeverityError, Field: annCanaryByHeader, Message: "invalid HTTP header name"}}
+	}
+	headerType := gatewayv1.HeaderMatchExact
+	return &gatewayv1.HTTPHeaderMatch{
+		Type: &headerType, Name: gatewayv1.HTTPHeaderName(header), Value: value,
+	}, nil
 }
 
 func checkUnknownAnnotations(ing *networkingv1.Ingress, strict bool, plan *Plan) {
@@ -431,21 +532,9 @@ func buildRule(
 		Path: &gatewayv1.HTTPPathMatch{Type: &matchType, Value: &pathValue},
 	}
 	if parseBool(ing.Annotations[annCanary]) {
-		header := strings.TrimSpace(ing.Annotations[annCanaryByHeader])
-		value := strings.TrimSpace(ing.Annotations[annCanaryByHeaderValue])
-		if header == "" || value == "" {
-			issues = append(issues, Issue{
-				Severity: SeverityError,
-				Field:    annCanary,
-				Message:  "only header/value canaries are currently supported; both canary-by-header and canary-by-header-value are required",
-			})
-		} else if !validHeaderName(header) {
-			issues = append(issues, Issue{Severity: SeverityError, Field: annCanaryByHeader, Message: "invalid HTTP header name"})
-		} else {
-			headerType := gatewayv1.HeaderMatchExact
-			match.Headers = []gatewayv1.HTTPHeaderMatch{{
-				Type: &headerType, Name: gatewayv1.HTTPHeaderName(header), Value: value,
-			}}
+		headerMatch, _ := headerCanaryMatch(ing.Annotations)
+		if headerMatch != nil {
+			match.Headers = []gatewayv1.HTTPHeaderMatch{*headerMatch}
 		}
 	}
 
@@ -453,11 +542,15 @@ func buildRule(
 	if err != nil {
 		issues = append(issues, Issue{Severity: SeverityError, Field: fmt.Sprintf("spec.rules.paths[%d].backend", index), Message: err.Error()})
 	}
+	backendName := gatewayv1.ObjectName("")
+	if path.Backend.Service != nil {
+		backendName = gatewayv1.ObjectName(path.Backend.Service.Name)
+	}
 	rule := gatewayv1.HTTPRouteRule{
 		Matches: []gatewayv1.HTTPRouteMatch{match},
 		BackendRefs: []gatewayv1.HTTPBackendRef{{
 			BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{
-				Name: gatewayv1.ObjectName(path.Backend.Service.Name), Port: ptr(gatewayv1.PortNumber(port)),
+				Name: backendName, Port: ptr(gatewayv1.PortNumber(port)),
 			}},
 		}},
 	}
@@ -513,9 +606,20 @@ func addPolicies(
 	}
 
 	if options.SettingsAsSnippets {
-		settingsSnippets, settingsIssues := buildSettingsSnippets(ing)
+		settingsSnippets, settingsIssues := buildProxySettingsSnippets(ing)
 		generatedLocationSnippets = append(generatedLocationSnippets, settingsSnippets...)
 		plan.Issues = append(plan.Issues, settingsIssues...)
+		if value := strings.ToLower(strings.TrimSpace(ing.Annotations[annProxyBodySize])); value != "" {
+			if !nginxSizePattern.MatchString(value) {
+				plan.Issues = append(plan.Issues, Issue{Severity: SeverityError, Field: annProxyBodySize, Message: "value is not supported by NGINX client_max_body_size"})
+			} else {
+				plan.Issues = append(plan.Issues, Issue{
+					Severity: SeverityError,
+					Field:    annProxyBodySize,
+					Message:  "proxy-body-size cannot be applied faithfully to overlapping non-canary routes; consolidate the routes into one HTTPRoute",
+				})
+			}
+		}
 	} else if value := strings.ToLower(strings.TrimSpace(ing.Annotations[annProxyBodySize])); value != "" {
 		if !nginxSizePattern.MatchString(value) {
 			plan.Issues = append(plan.Issues, Issue{Severity: SeverityError, Field: annProxyBodySize, Message: "value is not supported by NGF ClientSettingsPolicy"})
@@ -632,16 +736,9 @@ func ruleNeedsOriginalRequestURI(rule gatewayv1.HTTPRouteRule) bool {
 	return match.Method != nil || len(match.Headers) > 0 || len(match.QueryParams) > 0
 }
 
-func buildSettingsSnippets(ing *networkingv1.Ingress) ([]string, []Issue) {
+func buildProxySettingsSnippets(ing *networkingv1.Ingress) ([]string, []Issue) {
 	var snippets []string
 	var issues []Issue
-	if value := strings.ToLower(strings.TrimSpace(ing.Annotations[annProxyBodySize])); value != "" {
-		if !nginxSizePattern.MatchString(value) {
-			issues = append(issues, Issue{Severity: SeverityError, Field: annProxyBodySize, Message: "value is not supported by NGINX client_max_body_size"})
-		} else {
-			snippets = append(snippets, "client_max_body_size "+value+";")
-		}
-	}
 	for _, setting := range []struct {
 		annotation string
 		directive  string
@@ -854,8 +951,12 @@ func buildSnippets(
 	}
 
 	if authURL := strings.TrimSpace(ing.Annotations[annAuthURL]); authURL != "" {
+		bodySize := strings.ToLower(strings.TrimSpace(ing.Annotations[annProxyBodySize]))
+		if !nginxSizePattern.MatchString(bodySize) {
+			bodySize = ""
+		}
 		authServer, authLocation, err := externalAuthSnippets(
-			routeName, authURL, ing.Annotations, authSnippet, authProxyHeaders,
+			routeName, authURL, ing.Annotations, authSnippet, authProxyHeaders, bodySize,
 		)
 		if err != nil {
 			issues = append(issues, Issue{Severity: SeverityError, Field: annAuthURL, Message: err.Error()})
@@ -900,6 +1001,7 @@ func externalAuthSnippets(
 	annotations map[string]string,
 	authSnippet string,
 	authProxyHeaders map[string]string,
+	bodySize string,
 ) (string, string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
@@ -912,6 +1014,9 @@ func externalAuthSnippets(
 	var server strings.Builder
 	fmt.Fprintf(&server, "location = %s {\n", internalName)
 	server.WriteString("  internal;\n  proxy_intercept_errors off;\n  proxy_pass_request_body off;\n")
+	if bodySize != "" {
+		fmt.Fprintf(&server, "  client_max_body_size %s;\n", bodySize)
+	}
 	server.WriteString("  proxy_set_header Content-Length \"\";\n  proxy_set_header X-Forwarded-Proto \"\";\n")
 	server.WriteString("  proxy_set_header X-Request-ID $request_id;\n  proxy_set_header X-Original-URI $request_uri;\n")
 	server.WriteString("  proxy_set_header X-Original-URL $scheme://$http_host$request_uri;\n")
