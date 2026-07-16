@@ -171,6 +171,8 @@ func TestTranslateBasicAuth(t *testing.T) {
 func TestTranslateExternalAuth(t *testing.T) {
 	ing := testIngress(map[string]string{
 		annAuthURL:             "https://auth.zyno.io/validate",
+		annAuthMethod:          "POST",
+		annAuthRequestRedirect: "$scheme://$http_host$request_uri",
 		annAuthResponseHeaders: "X-Zyno-User, X-Zyno-Tenant",
 	})
 	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
@@ -181,10 +183,34 @@ func TestTranslateExternalAuth(t *testing.T) {
 	for _, snippet := range plan.SnippetsFilters[0].Spec.Snippets {
 		joined += snippet.Value
 	}
-	for _, expected := range []string{"auth_request", "proxy_ssl_server_name on", "proxy_set_header X-Zyno-User"} {
+	for _, expected := range []string{
+		"auth_request",
+		"proxy_pass_request_headers on",
+		"proxy_pass_request_body off",
+		"proxy_set_header Content-Length \"\"",
+		"proxy_set_header Proxy \"\"",
+		"proxy_method POST",
+		"proxy_set_header Host $http_host",
+		"proxy_set_header X-Original-URL $scheme://$http_host$request_uri",
+		"proxy_set_header X-Original-Method $request_method",
+		"proxy_set_header X-Sent-From \"nginx-ingress-controller\"",
+		"proxy_set_header X-Real-IP $remote_addr",
+		"proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for",
+		"proxy_set_header X-Forwarded-Host $http_host",
+		"proxy_set_header X-Forwarded-Port $server_port",
+		"proxy_set_header X-Forwarded-Proto $scheme",
+		"proxy_set_header X-Forwarded-Scheme $scheme",
+		"proxy_set_header X-Scheme $scheme",
+		"proxy_set_header X-Auth-Request-Redirect $scheme://$http_host$request_uri",
+		"proxy_ssl_server_name on",
+		"proxy_set_header X-Zyno-User",
+	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("generated external auth snippets do not contain %q:\n%s", expected, joined)
 		}
+	}
+	if strings.Contains(joined, "proxy_set_header Content-Type \"\"") {
+		t.Fatalf("generated external auth snippets clear Content-Type instead of forwarding it:\n%s", joined)
 	}
 }
 
@@ -399,14 +425,49 @@ func TestTranslateAuthProxySetHeaders(t *testing.T) {
 		if namespace != "apps" || name != "auth-headers" {
 			t.Fatalf("unexpected ConfigMap reference %s/%s", namespace, name)
 		}
-		return map[string]string{"Authorization": "$http_authorization"}, nil
+		return map[string]string{
+			"Authorization": "$http_authorization",
+			"Content-Type":  "application/json",
+		}, nil
 	}
 	plan := Translate(context.Background(), ing, testOptions(), nil, resolver)
 	if plan.Fatal() || len(plan.SnippetsFilters) != 1 {
 		t.Fatalf("auth proxy headers were not translated: %#v", plan)
 	}
-	if got := plan.SnippetsFilters[0].Spec.Snippets[0].Value; !strings.Contains(got, "proxy_set_header Authorization $http_authorization;") {
+	got := plan.SnippetsFilters[0].Spec.Snippets[0].Value
+	if !strings.Contains(got, "proxy_set_header Authorization $http_authorization;") {
 		t.Fatalf("generated auth location does not contain ConfigMap header:\n%s", got)
+	}
+	overrideContentType := strings.Index(got, "proxy_set_header Content-Type application/json;")
+	defaultHost := strings.Index(got, "proxy_set_header Host $http_host;")
+	if strings.Contains(got, "proxy_set_header Content-Type \"\";") || defaultHost < 0 || overrideContentType < defaultHost {
+		t.Fatalf("generated auth location does not preserve and then allow overriding request headers:\n%s", got)
+	}
+}
+
+func TestTranslateExternalAuthDefaultsAndValidation(t *testing.T) {
+	ing := testIngress(map[string]string{annAuthURL: "http://auth.apps.svc.cluster.local:8080/validate"})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if plan.Fatal() || len(plan.SnippetsFilters) != 1 {
+		t.Fatalf("default external auth was not translated: %#v", plan)
+	}
+	got := plan.SnippetsFilters[0].Spec.Snippets[0].Value
+	if !strings.Contains(got, "proxy_set_header X-Auth-Request-Redirect $request_uri;") || strings.Contains(got, "proxy_method ") {
+		t.Fatalf("generated auth location does not use ingress-nginx defaults:\n%s", got)
+	}
+
+	for annotation, value := range map[string]string{
+		annAuthMethod:          "post",
+		annAuthRequestRedirect: "$request_uri; return 200",
+	} {
+		invalid := testIngress(map[string]string{annAuthURL: "http://auth.apps.svc.cluster.local:8080/validate", annotation: value})
+		invalidPlan := Translate(context.Background(), invalid, testOptions(), nil, nil)
+		if !invalidPlan.Fatal() {
+			t.Fatalf("unsafe %s value was accepted: %#v", annotation, invalidPlan)
+		}
+		if len(invalidPlan.Issues) != 1 || invalidPlan.Issues[0].Field != annotation {
+			t.Fatalf("unsafe %s value was attributed to the wrong annotation: %#v", annotation, invalidPlan.Issues)
+		}
 	}
 }
 

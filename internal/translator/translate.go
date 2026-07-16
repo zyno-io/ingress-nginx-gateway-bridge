@@ -5,6 +5,7 @@ package translator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -23,11 +24,19 @@ import (
 )
 
 var (
-	nginxSizePattern     = regexp.MustCompile(`^[0-9]{1,4}(k|m|g)?$`)
-	nginxDurationPattern = regexp.MustCompile(`^[0-9]{1,4}(ms|s|m|h)?$`)
-	nginxUnsafePattern   = regexp.MustCompile(`[\r\n;{}]`)
-	nginxVariablePattern = regexp.MustCompile(`[^a-z0-9_]`)
+	nginxSizePattern       = regexp.MustCompile(`^[0-9]{1,4}(k|m|g)?$`)
+	nginxDurationPattern   = regexp.MustCompile(`^[0-9]{1,4}(ms|s|m|h)?$`)
+	nginxAuthMethodPattern = regexp.MustCompile(`^(GET|HEAD|POST|PUT|PATCH|DELETE|CONNECT|OPTIONS|TRACE)$`)
+	nginxUnsafePattern     = regexp.MustCompile(`[\r\n;{}]`)
+	nginxVariablePattern   = regexp.MustCompile(`[^a-z0-9_]`)
 )
+
+type annotationTranslationError struct {
+	field   string
+	message string
+}
+
+func (e annotationTranslationError) Error() string { return e.message }
 
 // PortResolver resolves a named Service port to its numeric value.
 type PortResolver func(ctx context.Context, namespace, service, portName string) (int32, error)
@@ -989,7 +998,12 @@ func buildSnippets(
 			routeName, authURL, ing.Annotations, authSnippet, authProxyHeaders, bodySize,
 		)
 		if err != nil {
-			issues = append(issues, Issue{Severity: SeverityError, Field: annAuthURL, Message: err.Error()})
+			field := annAuthURL
+			var annotationError annotationTranslationError
+			if errors.As(err, &annotationError) {
+				field = annotationError.field
+			}
+			issues = append(issues, Issue{Severity: SeverityError, Field: field, Message: err.Error()})
 		} else {
 			server = append(server, authServer)
 			location = append(location, authLocation)
@@ -1040,20 +1054,47 @@ func externalAuthSnippets(
 	if u.User != nil || nginxUnsafePattern.MatchString(rawURL) || strings.Contains(rawURL, "$") {
 		return "", "", fmt.Errorf("auth-url contains unsupported or unsafe characters")
 	}
+	authMethod := strings.TrimSpace(annotations[annAuthMethod])
+	if authMethod != "" && !nginxAuthMethodPattern.MatchString(authMethod) {
+		return "", "", annotationTranslationError{
+			field:   annAuthMethod,
+			message: "auth-method must be a supported uppercase HTTP method",
+		}
+	}
+	requestRedirect := strings.TrimSpace(annotations[annAuthRequestRedirect])
+	if requestRedirect == "" {
+		requestRedirect = "$request_uri"
+	} else if nginxUnsafePattern.MatchString(requestRedirect) || strings.ContainsAny(requestRedirect, " \t") {
+		return "", "", annotationTranslationError{
+			field:   annAuthRequestRedirect,
+			message: "auth-request-redirect contains unsafe characters",
+		}
+	}
 	internalName := "/_ngib_auth_" + strings.ReplaceAll(naming.DNSLabel(routeName), "-", "_")
 	var server strings.Builder
 	fmt.Fprintf(&server, "location = %s {\n", internalName)
-	server.WriteString("  internal;\n  proxy_intercept_errors off;\n  proxy_pass_request_body off;\n")
+	server.WriteString("  internal;\n  proxy_intercept_errors off;\n")
+	server.WriteString("  proxy_pass_request_headers on;\n  proxy_pass_request_body off;\n")
 	if bodySize != "" {
 		fmt.Fprintf(&server, "  client_max_body_size %s;\n", bodySize)
 	}
-	server.WriteString("  proxy_set_header Content-Length \"\";\n  proxy_set_header X-Forwarded-Proto \"\";\n")
+	server.WriteString("  proxy_set_header Content-Length \"\";\n  proxy_set_header Proxy \"\";\n")
+	if authMethod != "" {
+		fmt.Fprintf(&server, "  proxy_method %s;\n", authMethod)
+	}
 	server.WriteString("  proxy_set_header X-Request-ID $request_id;\n  proxy_set_header X-Original-URI $request_uri;\n")
 	server.WriteString("  proxy_set_header X-Original-URL $scheme://$http_host$request_uri;\n")
 	server.WriteString("  proxy_set_header X-Original-Method $request_method;\n")
-	server.WriteString("  proxy_set_header X-Sent-From \"ingress-nginx-gateway-bridge\";\n")
-	server.WriteString("  proxy_set_header X-Real-IP $remote_addr;\n  proxy_set_header X-Forwarded-For $remote_addr;\n")
-	server.WriteString("  proxy_set_header X-Auth-Request-Redirect $request_uri;\n")
+	server.WriteString("  proxy_set_header X-Sent-From \"nginx-ingress-controller\";\n")
+	server.WriteString("  proxy_set_header X-Real-IP $remote_addr;\n")
+	server.WriteString("  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
+	server.WriteString("  proxy_set_header X-Forwarded-Host $http_host;\n")
+	server.WriteString("  proxy_set_header X-Forwarded-Port $server_port;\n")
+	server.WriteString("  proxy_set_header X-Forwarded-Proto $scheme;\n")
+	server.WriteString("  proxy_set_header X-Forwarded-Scheme $scheme;\n")
+	server.WriteString("  proxy_set_header X-Scheme $scheme;\n")
+	server.WriteString("  proxy_set_header Host $http_host;\n")
+	fmt.Fprintf(&server, "  proxy_set_header X-Auth-Request-Redirect %s;\n", requestRedirect)
 	headerNames := make([]string, 0, len(authProxyHeaders))
 	for name := range authProxyHeaders {
 		headerNames = append(headerNames, name)
@@ -1069,7 +1110,6 @@ func externalAuthSnippets(
 		}
 		fmt.Fprintf(&server, "  proxy_set_header %s %s;\n", name, value)
 	}
-	fmt.Fprintf(&server, "  proxy_set_header Host %s;\n", u.Host)
 	if u.Scheme == "https" {
 		fmt.Fprintf(&server, "  proxy_ssl_server_name on;\n  proxy_ssl_name %s;\n", u.Hostname())
 	}

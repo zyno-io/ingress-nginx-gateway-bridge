@@ -31,7 +31,9 @@ const (
 	annRewriteTarget         = annotationPrefix + "rewrite-target"
 	annSSLRedirect           = annotationPrefix + "ssl-redirect"
 	annAuthURL               = annotationPrefix + "auth-url"
+	annAuthMethod            = annotationPrefix + "auth-method"
 	annAuthResponseHeaders   = annotationPrefix + "auth-response-headers"
+	annAuthRequestRedirect   = annotationPrefix + "auth-request-redirect"
 	annAuthSignin            = annotationPrefix + "auth-signin"
 	annAuthSnippet           = annotationPrefix + "auth-snippet"
 	annAuthType              = annotationPrefix + "auth-type"
@@ -55,8 +57,9 @@ var knownAnnotations = map[string]struct{}{
 	annCORSAllowMethods: {}, annCORSAllowHeaders: {}, annCORSExposeHeaders: {},
 	annCORSAllowCredentials: {}, annCORSMaxAge: {}, annCanary: {},
 	annCanaryByHeader: {}, annCanaryByHeaderValue: {}, annRewriteTarget: {},
-	annSSLRedirect: {}, annAuthURL: {}, annAuthResponseHeaders: {}, annAuthSignin: {},
-	annAuthSnippet: {}, annAuthType: {}, annAuthSecret: {}, annAuthRealm: {}, annAuthProxySetHeaders: {},
+	annSSLRedirect: {}, annAuthURL: {}, annAuthMethod: {}, annAuthResponseHeaders: {},
+	annAuthRequestRedirect: {}, annAuthSignin: {}, annAuthSnippet: {}, annAuthType: {},
+	annAuthSecret: {}, annAuthRealm: {}, annAuthProxySetHeaders: {},
 	annServerAlias: {}, annConfigurationSnippet: {}, annServerSnippet: {},
 	annUpstreamVHost: {}, annBackendProtocol: {}, annUseRegex: {},
 }
