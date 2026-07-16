@@ -43,17 +43,16 @@ func TestTranslateCommonAnnotations(t *testing.T) {
 		t.Fatalf("parent section = %q", got)
 	}
 	if len(application.Spec.Rules[0].Filters) != 3 {
-		t.Fatalf("filters = %d, want CORS + RequestHeaderModifier + SnippetsFilter", len(application.Spec.Rules[0].Filters))
+		t.Fatalf("filters = %d, want CORS + URLRewrite + SnippetsFilter", len(application.Spec.Rules[0].Filters))
 	}
 	if application.Spec.Rules[0].Filters[0].Type != gatewayv1.HTTPRouteFilterCORS {
 		t.Fatalf("first filter = %s, want CORS", application.Spec.Rules[0].Filters[0].Type)
 	}
 	hostFilter := application.Spec.Rules[0].Filters[1]
-	if hostFilter.Type != gatewayv1.HTTPRouteFilterRequestHeaderModifier ||
-		hostFilter.RequestHeaderModifier == nil ||
-		len(hostFilter.RequestHeaderModifier.Set) != 1 ||
-		hostFilter.RequestHeaderModifier.Set[0].Name != "Host" ||
-		hostFilter.RequestHeaderModifier.Set[0].Value != "backend.zyno.io" {
+	if hostFilter.Type != gatewayv1.HTTPRouteFilterURLRewrite ||
+		hostFilter.URLRewrite == nil ||
+		hostFilter.URLRewrite.Hostname == nil ||
+		*hostFilter.URLRewrite.Hostname != "backend.zyno.io" {
 		t.Fatalf("second filter does not replace the upstream Host header: %#v", hostFilter)
 	}
 	if application.Spec.Rules[0].Filters[2].ExtensionRef == nil || application.Spec.Rules[0].Filters[2].ExtensionRef.Kind != "SnippetsFilter" {
@@ -61,7 +60,7 @@ func TestTranslateCommonAnnotations(t *testing.T) {
 	}
 }
 
-func TestTranslateUpstreamVHostUsesRequestHeaderModifier(t *testing.T) {
+func TestTranslateUpstreamVHostUsesURLRewrite(t *testing.T) {
 	ing := testIngress(map[string]string{annUpstreamVHost: "kubernetes.default.svc"})
 	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
 	if plan.Fatal() {
@@ -73,14 +72,37 @@ func TestTranslateUpstreamVHostUsesRequestHeaderModifier(t *testing.T) {
 
 	rule := plan.HTTPRoutes[0].Spec.Rules[0]
 	if len(rule.Filters) != 1 {
-		t.Fatalf("filters = %d, want one RequestHeaderModifier: %#v", len(rule.Filters), rule.Filters)
+		t.Fatalf("filters = %d, want one URLRewrite: %#v", len(rule.Filters), rule.Filters)
 	}
 	filter := rule.Filters[0]
-	if filter.Type != gatewayv1.HTTPRouteFilterRequestHeaderModifier || filter.RequestHeaderModifier == nil {
-		t.Fatalf("upstream-vhost filter = %#v, want RequestHeaderModifier", filter)
+	if filter.Type != gatewayv1.HTTPRouteFilterURLRewrite || filter.URLRewrite == nil || filter.URLRewrite.Hostname == nil {
+		t.Fatalf("upstream-vhost filter = %#v, want URLRewrite", filter)
 	}
-	if got := filter.RequestHeaderModifier.Set; len(got) != 1 || got[0].Name != "Host" || got[0].Value != "kubernetes.default.svc" {
-		t.Fatalf("upstream-vhost set headers = %#v, want Host replacement", got)
+	if got := *filter.URLRewrite.Hostname; got != "kubernetes.default.svc" {
+		t.Fatalf("upstream-vhost hostname = %q, want kubernetes.default.svc", got)
+	}
+}
+
+func TestTranslateUpstreamVHostMergesWithPathRewrite(t *testing.T) {
+	ing := testIngress(map[string]string{
+		annUpstreamVHost: "backend.zyno.io",
+		annRewriteTarget: "/rewritten",
+	})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if plan.Fatal() {
+		t.Fatalf("plan unexpectedly fatal: %#v", plan.Issues)
+	}
+
+	rule := plan.HTTPRoutes[0].Spec.Rules[0]
+	if len(rule.Filters) != 1 {
+		t.Fatalf("filters = %d, want one merged URLRewrite: %#v", len(rule.Filters), rule.Filters)
+	}
+	rewrite := rule.Filters[0].URLRewrite
+	if rewrite == nil || rewrite.Hostname == nil || *rewrite.Hostname != "backend.zyno.io" {
+		t.Fatalf("merged URLRewrite hostname = %#v", rewrite)
+	}
+	if rewrite.Path == nil || rewrite.Path.ReplaceFullPath == nil || *rewrite.Path.ReplaceFullPath != "/rewritten" {
+		t.Fatalf("merged URLRewrite path = %#v", rewrite)
 	}
 }
 

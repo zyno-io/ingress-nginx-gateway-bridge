@@ -605,7 +605,7 @@ func addPolicies(
 		Group: gatewayv1.Group(gatewayv1.GroupVersion.Group), Kind: "HTTPRoute", Name: gatewayv1.ObjectName(route.Name),
 	}
 
-	plan.Issues = append(plan.Issues, addUpstreamVHostFilter(ing, route)...)
+	plan.Issues = append(plan.Issues, addUpstreamVHostRewrite(ing, route)...)
 
 	if options.SettingsAsSnippets {
 		settingsSnippets, settingsIssues := buildProxySettingsSnippets(ing)
@@ -677,29 +677,38 @@ func addPolicies(
 	}
 }
 
-func addUpstreamVHostFilter(ing *networkingv1.Ingress, route *gatewayv1.HTTPRoute) []Issue {
+func addUpstreamVHostRewrite(ing *networkingv1.Ingress, route *gatewayv1.HTTPRoute) []Issue {
 	host := strings.TrimSpace(ing.Annotations[annUpstreamVHost])
 	if host == "" {
 		return nil
 	}
-	if nginxUnsafePattern.MatchString(host) || strings.ContainsAny(host, " \t") {
+	if nginxUnsafePattern.MatchString(host) || strings.ContainsAny(host, " \t") || len(k8svalidation.IsDNS1123Subdomain(host)) > 0 {
 		return []Issue{{
 			Severity: SeverityError,
 			Field:    annUpstreamVHost,
-			Message:  "value contains characters unsafe for the upstream Host header",
+			Message:  "value must be a DNS hostname supported by Gateway API URLRewrite",
 		}}
 	}
 
+	hostname := gatewayv1.PreciseHostname(host)
 	for idx := range route.Spec.Rules {
-		route.Spec.Rules[idx].Filters = append(route.Spec.Rules[idx].Filters, gatewayv1.HTTPRouteFilter{
-			Type: gatewayv1.HTTPRouteFilterRequestHeaderModifier,
-			RequestHeaderModifier: &gatewayv1.HTTPHeaderFilter{
-				Set: []gatewayv1.HTTPHeader{{
-					Name:  gatewayv1.HTTPHeaderName("Host"),
-					Value: host,
-				}},
-			},
-		})
+		rule := &route.Spec.Rules[idx]
+		merged := false
+		for filterIdx := range rule.Filters {
+			filter := &rule.Filters[filterIdx]
+			if filter.Type != gatewayv1.HTTPRouteFilterURLRewrite || filter.URLRewrite == nil {
+				continue
+			}
+			filter.URLRewrite.Hostname = &hostname
+			merged = true
+			break
+		}
+		if !merged {
+			rule.Filters = append(rule.Filters, gatewayv1.HTTPRouteFilter{
+				Type:       gatewayv1.HTTPRouteFilterURLRewrite,
+				URLRewrite: &gatewayv1.HTTPURLRewriteFilter{Hostname: &hostname},
+			})
+		}
 	}
 	return nil
 }
