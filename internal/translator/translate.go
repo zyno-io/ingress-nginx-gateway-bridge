@@ -1078,37 +1078,65 @@ func externalAuthSnippets(
 	if bodySize != "" {
 		fmt.Fprintf(&server, "  client_max_body_size %s;\n", bodySize)
 	}
-	server.WriteString("  proxy_set_header Content-Length \"\";\n  proxy_set_header Proxy \"\";\n")
-	if authMethod != "" {
-		fmt.Fprintf(&server, "  proxy_method %s;\n", authMethod)
-	}
-	server.WriteString("  proxy_set_header X-Request-ID $request_id;\n  proxy_set_header X-Original-URI $request_uri;\n")
-	server.WriteString("  proxy_set_header X-Original-URL $scheme://$http_host$request_uri;\n")
-	server.WriteString("  proxy_set_header X-Original-Method $request_method;\n")
-	server.WriteString("  proxy_set_header X-Sent-From \"nginx-ingress-controller\";\n")
-	server.WriteString("  proxy_set_header X-Real-IP $remote_addr;\n")
-	server.WriteString("  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
-	server.WriteString("  proxy_set_header X-Forwarded-Host $http_host;\n")
-	server.WriteString("  proxy_set_header X-Forwarded-Port $server_port;\n")
-	server.WriteString("  proxy_set_header X-Forwarded-Proto $scheme;\n")
-	server.WriteString("  proxy_set_header X-Forwarded-Scheme $scheme;\n")
-	server.WriteString("  proxy_set_header X-Scheme $scheme;\n")
-	server.WriteString("  proxy_set_header Host $http_host;\n")
-	fmt.Fprintf(&server, "  proxy_set_header X-Auth-Request-Redirect %s;\n", requestRedirect)
 	headerNames := make([]string, 0, len(authProxyHeaders))
 	for name := range authProxyHeaders {
 		headerNames = append(headerNames, name)
 	}
 	sort.Strings(headerNames)
+	type headerOverride struct {
+		name  string
+		value string
+	}
+	headerOverrides := make(map[string]headerOverride, len(headerNames))
 	for _, name := range headerNames {
 		value := authProxyHeaders[name]
 		if !validHeaderName(name) || nginxUnsafePattern.MatchString(value) {
 			return "", "", fmt.Errorf("auth-proxy-set-headers contains unsafe header %q", name)
 		}
+		normalizedName := strings.ToLower(name)
+		if previous, exists := headerOverrides[normalizedName]; exists {
+			return "", "", fmt.Errorf("auth-proxy-set-headers contains duplicate headers %q and %q", previous.name, name)
+		}
 		if strings.TrimSpace(value) == "" {
 			value = "\"\""
 		}
+		headerOverrides[normalizedName] = headerOverride{name: name, value: value}
+	}
+	writeHeader := func(name, value string) {
+		if override, exists := headerOverrides[strings.ToLower(name)]; exists {
+			value = override.value
+			delete(headerOverrides, strings.ToLower(name))
+		}
 		fmt.Fprintf(&server, "  proxy_set_header %s %s;\n", name, value)
+	}
+	writeHeader("Content-Length", "\"\"")
+	writeHeader("Proxy", "\"\"")
+	if authMethod != "" {
+		fmt.Fprintf(&server, "  proxy_method %s;\n", authMethod)
+	}
+	writeHeader("X-Request-ID", "$request_id")
+	writeHeader("X-Original-URI", "$request_uri")
+	writeHeader("X-Original-URL", "$scheme://$http_host$request_uri")
+	writeHeader("X-Original-Method", "$request_method")
+	writeHeader("X-Sent-From", "\"nginx-ingress-controller\"")
+	writeHeader("X-Real-IP", "$remote_addr")
+	writeHeader("X-Forwarded-For", "$proxy_add_x_forwarded_for")
+	writeHeader("X-Forwarded-Host", "$http_host")
+	writeHeader("X-Forwarded-Port", "$server_port")
+	writeHeader("X-Forwarded-Proto", "$scheme")
+	writeHeader("X-Forwarded-Scheme", "$scheme")
+	writeHeader("X-Scheme", "$scheme")
+	writeHeader("Host", "$http_host")
+	writeHeader("X-Auth-Request-Redirect", requestRedirect)
+	remainingHeaders := make([]headerOverride, 0, len(headerOverrides))
+	for _, header := range headerOverrides {
+		remainingHeaders = append(remainingHeaders, header)
+	}
+	sort.Slice(remainingHeaders, func(i, j int) bool {
+		return remainingHeaders[i].name < remainingHeaders[j].name
+	})
+	for _, header := range remainingHeaders {
+		fmt.Fprintf(&server, "  proxy_set_header %s %s;\n", header.name, header.value)
 	}
 	if u.Scheme == "https" {
 		fmt.Fprintf(&server, "  proxy_ssl_server_name on;\n  proxy_ssl_name %s;\n", u.Hostname())

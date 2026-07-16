@@ -428,6 +428,7 @@ func TestTranslateAuthProxySetHeaders(t *testing.T) {
 		return map[string]string{
 			"Authorization": "$http_authorization",
 			"Content-Type":  "application/json",
+			"host":          "authgw.zyno.dev",
 		}, nil
 	}
 	plan := Translate(context.Background(), ing, testOptions(), nil, resolver)
@@ -439,9 +440,19 @@ func TestTranslateAuthProxySetHeaders(t *testing.T) {
 		t.Fatalf("generated auth location does not contain ConfigMap header:\n%s", got)
 	}
 	overrideContentType := strings.Index(got, "proxy_set_header Content-Type application/json;")
-	defaultHost := strings.Index(got, "proxy_set_header Host $http_host;")
-	if strings.Contains(got, "proxy_set_header Content-Type \"\";") || defaultHost < 0 || overrideContentType < defaultHost {
-		t.Fatalf("generated auth location does not preserve and then allow overriding request headers:\n%s", got)
+	overrideHost := strings.Index(got, "proxy_set_header Host authgw.zyno.dev;")
+	if strings.Contains(got, "proxy_set_header Content-Type \"\";") || overrideHost < 0 || overrideContentType < overrideHost {
+		t.Fatalf("generated auth location does not preserve and override request headers:\n%s", got)
+	}
+	if strings.Contains(got, "proxy_set_header Host $http_host;") || strings.Count(got, "proxy_set_header Host ") != 1 {
+		t.Fatalf("generated auth location contains duplicate Host headers:\n%s", got)
+	}
+
+	duplicatePlan := Translate(context.Background(), ing, testOptions(), nil, func(context.Context, string, string) (map[string]string, error) {
+		return map[string]string{"Host": "auth.example.com", "host": "other.example.com"}, nil
+	})
+	if !duplicatePlan.Fatal() {
+		t.Fatalf("case-insensitive duplicate auth proxy headers were accepted: %#v", duplicatePlan)
 	}
 }
 

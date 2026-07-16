@@ -23,7 +23,7 @@ The bridge is deliberately implementation-specific. This table describes the cur
 | `auth-response-headers` | Generated `auth_request_set` and upstream request headers | Supported with `auth-url` |
 | `auth-request-redirect` | `X-Auth-Request-Redirect` on the internal auth subrequest | Supported with `auth-url`; defaults to `$request_uri` when omitted |
 | `auth-signin` | Generated 401 error-page redirect | Supported with `auth-url`; ingress-nginx-only variables such as `$escaped_request_uri` are rejected, and the bridge does not append ingress-nginx's implicit `rd` query parameter |
-| `auth-proxy-set-headers` | Watched ConfigMap data becomes request headers on the internal auth subrequest | Supported with `auth-url` |
+| `auth-proxy-set-headers` | Watched ConfigMap data becomes request headers on the internal auth subrequest, replacing matching defaults case-insensitively | Supported with `auth-url` |
 | `auth-snippet` | Source snippet inside the generated internal auth location | Requires `--allow-snippets` |
 | `configuration-snippet` | Source location snippet | Requires `--allow-snippets` |
 | `server-snippet` | Source server snippet | Requires `--allow-snippets` |
