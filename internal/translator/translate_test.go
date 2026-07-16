@@ -35,21 +35,63 @@ func TestTranslateCommonAnnotations(t *testing.T) {
 	if len(plan.ClientSettingsPolicies) != 1 || len(plan.ProxySettingsPolicies) != 1 {
 		t.Fatalf("expected client and proxy policies, got %#v", plan)
 	}
-	if len(plan.SnippetsFilters) != 1 || !strings.Contains(plan.SnippetsFilters[0].Spec.Snippets[0].Value, "proxy_set_header Host backend.zyno.io;") {
-		t.Fatalf("upstream-vhost was not translated to an NGF location snippet: %#v", plan.SnippetsFilters)
+	if len(plan.SnippetsFilters) != 1 {
+		t.Fatalf("CORS compatibility SnippetsFilter count = %d, want 1", len(plan.SnippetsFilters))
 	}
 	application := plan.HTTPRoutes[0]
 	if got := string(*application.Spec.ParentRefs[0].SectionName); got != "https" {
 		t.Fatalf("parent section = %q", got)
 	}
-	if len(application.Spec.Rules[0].Filters) != 2 {
-		t.Fatalf("filters = %d, want CORS + SnippetsFilter", len(application.Spec.Rules[0].Filters))
+	if len(application.Spec.Rules[0].Filters) != 3 {
+		t.Fatalf("filters = %d, want CORS + RequestHeaderModifier + SnippetsFilter", len(application.Spec.Rules[0].Filters))
 	}
 	if application.Spec.Rules[0].Filters[0].Type != gatewayv1.HTTPRouteFilterCORS {
 		t.Fatalf("first filter = %s, want CORS", application.Spec.Rules[0].Filters[0].Type)
 	}
-	if application.Spec.Rules[0].Filters[1].ExtensionRef == nil || application.Spec.Rules[0].Filters[1].ExtensionRef.Kind != "SnippetsFilter" {
-		t.Fatalf("second filter does not reference the upstream-vhost SnippetsFilter: %#v", application.Spec.Rules[0].Filters[1])
+	hostFilter := application.Spec.Rules[0].Filters[1]
+	if hostFilter.Type != gatewayv1.HTTPRouteFilterRequestHeaderModifier ||
+		hostFilter.RequestHeaderModifier == nil ||
+		len(hostFilter.RequestHeaderModifier.Set) != 1 ||
+		hostFilter.RequestHeaderModifier.Set[0].Name != "Host" ||
+		hostFilter.RequestHeaderModifier.Set[0].Value != "backend.zyno.io" {
+		t.Fatalf("second filter does not replace the upstream Host header: %#v", hostFilter)
+	}
+	if application.Spec.Rules[0].Filters[2].ExtensionRef == nil || application.Spec.Rules[0].Filters[2].ExtensionRef.Kind != "SnippetsFilter" {
+		t.Fatalf("third filter does not reference the CORS compatibility SnippetsFilter: %#v", application.Spec.Rules[0].Filters[2])
+	}
+}
+
+func TestTranslateUpstreamVHostUsesRequestHeaderModifier(t *testing.T) {
+	ing := testIngress(map[string]string{annUpstreamVHost: "kubernetes.default.svc"})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if plan.Fatal() {
+		t.Fatalf("plan unexpectedly fatal: %#v", plan.Issues)
+	}
+	if len(plan.SnippetsFilters) != 0 {
+		t.Fatalf("upstream-vhost generated SnippetsFilters: %#v", plan.SnippetsFilters)
+	}
+
+	rule := plan.HTTPRoutes[0].Spec.Rules[0]
+	if len(rule.Filters) != 1 {
+		t.Fatalf("filters = %d, want one RequestHeaderModifier: %#v", len(rule.Filters), rule.Filters)
+	}
+	filter := rule.Filters[0]
+	if filter.Type != gatewayv1.HTTPRouteFilterRequestHeaderModifier || filter.RequestHeaderModifier == nil {
+		t.Fatalf("upstream-vhost filter = %#v, want RequestHeaderModifier", filter)
+	}
+	if got := filter.RequestHeaderModifier.Set; len(got) != 1 || got[0].Name != "Host" || got[0].Value != "kubernetes.default.svc" {
+		t.Fatalf("upstream-vhost set headers = %#v, want Host replacement", got)
+	}
+}
+
+func TestTranslateRejectsUnsafeUpstreamVHost(t *testing.T) {
+	ing := testIngress(map[string]string{annUpstreamVHost: "first.example second.example"})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if !plan.Fatal() {
+		t.Fatalf("unsafe upstream-vhost was accepted: %#v", plan)
+	}
+	if len(plan.HTTPRoutes[0].Spec.Rules[0].Filters) != 0 {
+		t.Fatalf("unsafe upstream-vhost generated filters: %#v", plan.HTTPRoutes[0].Spec.Rules[0].Filters)
 	}
 }
 

@@ -605,6 +605,8 @@ func addPolicies(
 		Group: gatewayv1.Group(gatewayv1.GroupVersion.Group), Kind: "HTTPRoute", Name: gatewayv1.ObjectName(route.Name),
 	}
 
+	plan.Issues = append(plan.Issues, addUpstreamVHostFilter(ing, route)...)
+
 	if options.SettingsAsSnippets {
 		settingsSnippets, settingsIssues := buildProxySettingsSnippets(ing)
 		generatedLocationSnippets = append(generatedLocationSnippets, settingsSnippets...)
@@ -673,6 +675,33 @@ func addPolicies(
 		plan.SnippetsFilters = append(plan.SnippetsFilters, *snippetFilter)
 		appendExtensionFilter(route, "SnippetsFilter", snippetFilter.Name)
 	}
+}
+
+func addUpstreamVHostFilter(ing *networkingv1.Ingress, route *gatewayv1.HTTPRoute) []Issue {
+	host := strings.TrimSpace(ing.Annotations[annUpstreamVHost])
+	if host == "" {
+		return nil
+	}
+	if nginxUnsafePattern.MatchString(host) || strings.ContainsAny(host, " \t") {
+		return []Issue{{
+			Severity: SeverityError,
+			Field:    annUpstreamVHost,
+			Message:  "value contains characters unsafe for the upstream Host header",
+		}}
+	}
+
+	for idx := range route.Spec.Rules {
+		route.Spec.Rules[idx].Filters = append(route.Spec.Rules[idx].Filters, gatewayv1.HTTPRouteFilter{
+			Type: gatewayv1.HTTPRouteFilterRequestHeaderModifier,
+			RequestHeaderModifier: &gatewayv1.HTTPHeaderFilter{
+				Set: []gatewayv1.HTTPHeader{{
+					Name:  gatewayv1.HTTPHeaderName("Host"),
+					Value: host,
+				}},
+			},
+		})
+	}
+	return nil
 }
 
 func addUnverifiedBackendTLSFilters(
@@ -921,14 +950,6 @@ func buildSnippets(
 	var issues []Issue
 	var server, location []string
 	location = append(location, generatedLocationSnippets...)
-
-	if host := strings.TrimSpace(ing.Annotations[annUpstreamVHost]); host != "" {
-		if nginxUnsafePattern.MatchString(host) || strings.ContainsAny(host, " \t") {
-			issues = append(issues, Issue{Severity: SeverityError, Field: annUpstreamVHost, Message: "value contains characters unsafe for generated NGINX configuration"})
-		} else {
-			location = append(location, "proxy_set_header Host "+host+";")
-		}
-	}
 
 	authSnippet := strings.TrimSpace(ing.Annotations[annAuthSnippet])
 	if authSnippet != "" {
