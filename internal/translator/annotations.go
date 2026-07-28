@@ -46,6 +46,7 @@ const (
 	annUpstreamVHost         = annotationPrefix + "upstream-vhost"
 	annBackendProtocol       = annotationPrefix + "backend-protocol"
 	annUseRegex              = annotationPrefix + "use-regex"
+	annWhitelistSourceRange  = annotationPrefix + "whitelist-source-range"
 )
 
 var knownAnnotations = map[string]struct{}{
@@ -62,4 +63,5 @@ var knownAnnotations = map[string]struct{}{
 	annAuthSecret: {}, annAuthRealm: {}, annAuthProxySetHeaders: {},
 	annServerAlias: {}, annConfigurationSnippet: {}, annServerSnippet: {},
 	annUpstreamVHost: {}, annBackendProtocol: {}, annUseRegex: {},
+	annWhitelistSourceRange: {},
 }

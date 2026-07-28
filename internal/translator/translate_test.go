@@ -552,6 +552,44 @@ func TestTranslateRejectsUnknownAndRawSnippets(t *testing.T) {
 	}
 }
 
+func TestTranslateAllowsUnrestrictedWhitelistSourceRange(t *testing.T) {
+	ing := testIngress(map[string]string{
+		annWhitelistSourceRange: "  ::/0, 0.0.0.0/0, ::/0  ",
+	})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if plan.Fatal() {
+		t.Fatalf("unrestricted whitelist-source-range was rejected: %#v", plan.Issues)
+	}
+}
+
+func TestTranslateAllowsRedundantWhitelistSourceRange(t *testing.T) {
+	ing := testIngress(map[string]string{
+		annWhitelistSourceRange: "10.0.0.0/8, ::/0, 0.0.0.0/0, 2001:db8::/32",
+	})
+	plan := Translate(context.Background(), ing, testOptions(), nil, nil)
+	if plan.Fatal() {
+		t.Fatalf("unrestricted whitelist-source-range with redundant CIDRs was rejected: %#v", plan.Issues)
+	}
+}
+
+func TestTranslateRejectsRestrictiveOrMalformedWhitelistSourceRange(t *testing.T) {
+	for name, value := range map[string]string{
+		"restrictive IPv4": "10.0.0.0/8, ::/0",
+		"restrictive IPv6": "0.0.0.0/0, 2001:db8::/32",
+		"malformed":        "0.0.0.0/0, definitely-not-a-cidr, ::/0",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ing := testIngress(map[string]string{annWhitelistSourceRange: value})
+			options := testOptions()
+			options.Strict = false
+			plan := Translate(context.Background(), ing, options, nil, nil)
+			if !plan.Fatal() {
+				t.Fatalf("whitelist-source-range %q was accepted: %#v", value, plan.Issues)
+			}
+		})
+	}
+}
+
 func TestCaptureRewriteUsesGeneratedSnippet(t *testing.T) {
 	ing := testIngress(map[string]string{annRewriteTarget: "/$2"})
 	implementationSpecific := networkingv1.PathTypeImplementationSpecific

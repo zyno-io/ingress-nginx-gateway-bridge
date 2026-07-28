@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"sort"
@@ -73,6 +74,7 @@ func Translate(
 ) Plan {
 	plan := Plan{}
 	checkUnknownAnnotations(ing, options.Strict, &plan)
+	validateWhitelistSourceRange(ing, &plan)
 	plan.Issues = append(plan.Issues, ValidateCanary(ing)...)
 
 	protocol := strings.ToUpper(strings.TrimSpace(ing.Annotations[annBackendProtocol]))
@@ -231,6 +233,50 @@ func checkUnknownAnnotations(ing *networkingv1.Ingress, strict bool, plan *Plan)
 			Message:  "annotation has no declared compatibility translation",
 		})
 	}
+}
+
+// validateWhitelistSourceRange accepts only source ranges that leave both IP
+// address families unrestricted. NGF has no equivalent source-address policy,
+// so treating any narrower allow list as a no-op would expose an Ingress.
+func validateWhitelistSourceRange(ing *networkingv1.Ingress, plan *Plan) {
+	raw, configured := ing.Annotations[annWhitelistSourceRange]
+	if !configured {
+		return
+	}
+
+	var allowsAllIPv4, allowsAllIPv6 bool
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			plan.Issues = append(plan.Issues, Issue{
+				Severity: SeverityError,
+				Field:    annWhitelistSourceRange,
+				Message:  fmt.Sprintf("whitelist-source-range contains invalid CIDR %q", value),
+			})
+			return
+		}
+
+		prefix = prefix.Masked()
+		switch {
+		case prefix.Addr().Is4() && prefix.Bits() == 0:
+			allowsAllIPv4 = true
+		case prefix.Addr().Is6() && prefix.Bits() == 0:
+			allowsAllIPv6 = true
+		default:
+			// A valid narrower CIDR is harmless when the corresponding /0 is
+			// also present, but it cannot be translated into source filtering.
+		}
+	}
+
+	if allowsAllIPv4 && allowsAllIPv6 {
+		return
+	}
+	plan.Issues = append(plan.Issues, Issue{
+		Severity: SeverityError,
+		Field:    annWhitelistSourceRange,
+		Message:  "whitelist-source-range must allow all IPv4 and IPv6 source addresses; source filtering is not supported",
+	})
 }
 
 func parseBackendTLS(ing *networkingv1.Ingress) (*backendTLSConfig, []Issue) {
