@@ -64,6 +64,8 @@ type canaryHostInput struct {
 	input   hostInput
 }
 
+const acmeHTTP01SolverLabel = "acme.cert-manager.io/http01-solver"
+
 // Translate converts one Ingress into same-namespace Gateway API and NGF objects.
 func Translate(
 	ctx context.Context,
@@ -155,7 +157,7 @@ func Translate(
 		addPolicies(ing, &route, locationSnippets, authProxyHeaders, backendTLS, options, &plan)
 		plan.HTTPRoutes[len(plan.HTTPRoutes)-1] = route
 
-		if input.tlsHostname != "" && sslRedirectEnabled(ing.Annotations) && !parseBool(ing.Annotations[annCanary]) {
+		if input.tlsHostname != "" && sslRedirectEnabled(ing.Annotations) && !parseBool(ing.Annotations[annCanary]) && !isACMEHTTP01Solver(ing) {
 			plan.HTTPRoutes = append(plan.HTTPRoutes, buildRedirectRoute(ing, input.hostname, options))
 		}
 	}
@@ -516,16 +518,13 @@ func buildRoute(
 			Namespace: ing.Namespace,
 			Labels:    sourceLabels(ing),
 		},
-		Spec: gatewayv1.HTTPRouteSpec{
-			CommonRouteSpec: gatewayv1.CommonRouteSpec{
-				ParentRefs: applicationParentRefs(
-					ing.Namespace,
-					input,
-					options.Gateway,
-					input.tlsHostname != "" && !sslRedirectEnabled(ing.Annotations),
-				),
-			},
-		},
+		Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: applicationParentRefs(
+			ing.Namespace,
+			input,
+			options.Gateway,
+			input.tlsHostname != "" && !sslRedirectEnabled(ing.Annotations),
+			isACMEHTTP01Solver(ing),
+		)}},
 	}
 	if input.hostname != "" {
 		route.Spec.Hostnames = []gatewayv1.Hostname{gatewayv1.Hostname(input.hostname)}
@@ -1278,7 +1277,11 @@ func applicationParentRefs(
 	input hostInput,
 	options GatewayOptions,
 	attachHTTP bool,
+	httpOnly bool,
 ) []gatewayv1.ParentReference {
+	if httpOnly {
+		return []gatewayv1.ParentReference{parentRef(namespace, false, input.hostname, options)}
+	}
 	tls := input.tlsHostname != ""
 	tlsOptions := options
 	if input.tlsSectionName != "" {
@@ -1289,6 +1292,10 @@ func applicationParentRefs(
 		refs = append(refs, parentRef(namespace, false, input.hostname, options))
 	}
 	return refs
+}
+
+func isACMEHTTP01Solver(ing *networkingv1.Ingress) bool {
+	return parseBool(ing.Labels[acmeHTTP01SolverLabel])
 }
 
 func parentRef(namespace string, tls bool, hostname string, options GatewayOptions) gatewayv1.ParentReference {

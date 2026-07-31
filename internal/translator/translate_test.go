@@ -743,6 +743,29 @@ func TestSharedHostTLSAttachesSiblingRoute(t *testing.T) {
 	}
 }
 
+func TestCertManagerHTTP01SolverUsesHTTPDespiteMatchingTLSHost(t *testing.T) {
+	ing := testIngress(nil)
+	ing.Spec.TLS = nil
+	ing.Labels = map[string]string{acmeHTTP01SolverLabel: "true"}
+	options := testOptions()
+	options.TLSHosts = map[string]struct{}{"app.zyno.io": {}}
+
+	plan := Translate(context.Background(), ing, options, nil, nil)
+	if plan.Fatal() {
+		t.Fatalf("plan unexpectedly fatal: %#v", plan.Issues)
+	}
+	if got := len(plan.HTTPRoutes); got != 1 {
+		t.Fatalf("HTTPRoutes = %d, want solver route without HTTPS redirect", got)
+	}
+	refs := plan.HTTPRoutes[0].Spec.ParentRefs
+	if got := len(refs); got != 1 {
+		t.Fatalf("parent refs = %d, want HTTP only", got)
+	}
+	if got := string(*refs[0].SectionName); got != "http" {
+		t.Fatalf("parent section = %q, want HTTP", got)
+	}
+}
+
 func TestRejectsIngressNginxEscapedRequestURI(t *testing.T) {
 	ing := testIngress(map[string]string{
 		annAuthURL:    "https://auth.zyno.dev/oauth2/auth",

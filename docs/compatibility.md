@@ -15,6 +15,7 @@ The bridge is deliberately implementation-specific. This table describes the cur
 | `canary`, `canary-by-header`, `canary-by-header-value` | `HTTPRouteMatch.headers` | Supported as a complete header/value set |
 | `rewrite-target` | `URLRewrite` for literal paths; generated rewrite snippet for capture groups | Supported; captures require NGF snippets |
 | `ssl-redirect` | Separate HTTP `RequestRedirect` route | Supported |
+| cert-manager HTTP-01 solver Ingress | HTTP-only `HTTPRoute` without a redirect | Detected by the `acme.cert-manager.io/http01-solver=true` label |
 | `whitelist-source-range` | None | Supported only when it includes both unrestricted CIDRs, `0.0.0.0/0` and `::/0`; then it is a no-op. Source filtering is otherwise rejected. |
 | `upstream-vhost` | Gateway API `URLRewrite.hostname`, which replaces NGF's generated upstream `Host` header | Supported for DNS hostnames |
 | `server-alias` | Additional hostname-specific HTTPRoutes | Supported; aliases not covered by TLS remain HTTP-only |
