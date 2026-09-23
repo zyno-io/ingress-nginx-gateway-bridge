@@ -1,6 +1,6 @@
 module github.com/zyno-io/ingress-nginx-gateway-bridge
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/nginx/nginx-gateway-fabric/v2 v2.6.6
