@@ -47,7 +47,7 @@ The bridge is deliberately implementation-specific. This table describes the cur
 - Verified backend HTTPS requires ingress-nginx's trust annotations; the referenced Secret must contain `ca.crt` and reside in the Ingress namespace. The generated `BackendTLSPolicy` targets the Service, so isolate a Service when different ports require different TLS settings.
 - Non-Service resource backends are rejected.
 - More than 16 paths for one hostname is currently rejected instead of being split across routes.
-- More than 63 frontend TLS hostnames requires splitting traffic across Gateways or future ListenerSet support.
+- Beyond 63 frontend TLS hostnames, managed mode automatically overflows onto bridge-managed `ListenerSet` resources (64 listeners each) when the `ListenerSet` CRD is installed; hostnames covered by the same wildcard certificate collapse onto one shared listener first, so overflow is only reached past 63 distinct listeners after collapse. Without the `ListenerSet` CRD, the Gateway stays capped at 63 HTTPS listeners and any hostname beyond that is rejected with a field-level error on its own Ingress, leaving every other hostname unaffected.
 
 ## Verified kube-api edge profile
 

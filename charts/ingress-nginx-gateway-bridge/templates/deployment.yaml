@@ -38,6 +38,7 @@ spec:
             - --nginx-proxy-name={{ .Values.controller.gateway.nginxProxyName }}
             - --manage-gateway={{ .Values.controller.gateway.manage }}
             - --allow-listener-sets={{ .Values.controller.gateway.allowListenerSets }}
+            - --collapse-wildcard-certificates={{ .Values.controller.gateway.collapseWildcardCertificates }}
             - --http-section-name={{ .Values.controller.gateway.httpSectionName }}
             - --https-section-name={{ .Values.controller.gateway.httpsSectionName }}
             - --watch-ingress-without-class={{ .Values.controller.watchIngressWithoutClass }}

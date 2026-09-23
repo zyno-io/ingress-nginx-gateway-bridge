@@ -8,6 +8,11 @@ rules:
   - apiGroups: [""]
     resources: ["services", "configmaps"]
     verbs: ["get", "list", "watch"]
+  {{- if and .Values.controller.gateway.manage .Values.controller.gateway.collapseWildcardCertificates }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
@@ -18,7 +23,7 @@ rules:
     resources: ["ingresses/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gateways", "httproutes", "referencegrants", "backendtlspolicies"]
+    resources: ["gateways", "listenersets", "httproutes", "referencegrants", "backendtlspolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["gateway.nginx.org"]
     resources:

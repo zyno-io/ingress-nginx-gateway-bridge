@@ -50,13 +50,14 @@ Selection can be changed with Helm values or flags. `gateway.zyno.io/enabled: "t
 - Selected source Ingresses carry `gateway.zyno.io/translation-status=ready|pending|failed` for direct filtering; detailed status remains on `IngressTranslation`.
 - Source-provided NGINX snippets are disabled by default.
 - The shared Gateway is reconciled serially and once at startup, including when no Ingress is currently selected.
+- Wildcard certificate collapse requires cluster-wide read access to all Secrets (Kubernetes RBAC cannot scope a grant to `kubernetes.io/tls` specifically); the controller reads full TLS Secrets from the API server but retains only a fingerprint and wildcard SANs in memory, and no certificate or key material is written back to any object or cache entry.
 
 See [the compatibility matrix](docs/compatibility.md) for annotation-level behavior and known gaps.
 
 ## Prerequisites
 
 - Kubernetes 1.31 or newer
-- Gateway API 1.5 CRDs
+- Gateway API 1.5 standard CRDs, including `ListenerSet`, when managed mode may need more than 63 TLS hostnames on the shared Gateway
 - NGINX Gateway Fabric 2.6.x
 - An NGF `GatewayClass` (the default expected name is `nginx`)
 - NGF snippets enabled when using unverified HTTPS backends, external auth, capture-group rewrites, request-buffering overrides, or source snippets:
@@ -107,6 +108,7 @@ See [the hot-swap runbook](docs/hot-swap.md) before using the controller alongsi
 | `controller.gateway.className` | `nginx` | GatewayClass for a managed Gateway |
 | `controller.gateway.nginxProxyName` | empty | Optional same-namespace NGF `NginxProxy` parameters resource; required for `ExternalName` backends |
 | `controller.gateway.allowListenerSets` | `false` | Allow platform-owned `ListenerSet` resources from the managed Gateway namespace |
+| `controller.gateway.collapseWildcardCertificates` | `true` | Serve TLS hostnames covered by a wildcard certificate from one wildcard HTTPS listener; requires cluster-wide read access to all Secrets (RBAC cannot scope by Secret type) |
 | `controller.watchIngressWithoutClass` | `true` | Include classless Ingresses |
 | `controller.ingressClasses` | `[nginx]` | Additional selected Ingress class names |
 | `controller.strict` | `true` | Reject unknown ingress-nginx annotations |

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	ngfv1alpha1 "github.com/nginx/nginx-gateway-fabric/v2/apis/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -46,13 +47,31 @@ type IngressReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Config Config
+
+	// managedMu serializes access to the sticky managed-Gateway planning
+	// state below. Reconciliation is already serialized by
+	// MaxConcurrentReconciles, but the mutex keeps that invariant explicit
+	// and safe even if that ever changes.
+	managedMu sync.Mutex
+	// listenerPlacements is the previous plan's listener placement, kept in
+	// memory so listener placement stays sticky across reconciliations. It
+	// is bootstrapped from the cluster on the first plan after startup.
+	listenerPlacements map[string]translator.ListenerPlacement
+	// certificates caches TLS Secret lookups, including negative results,
+	// across reconciliations. It is invalidated on every certificate-sync request.
+	certificates map[types.NamespacedName]certificateEntry
+	// affectedIngresses carries Ingresses whose TLS listener moved parents
+	// as a side effect of a managed Gateway replan, so they can be pushed at
+	// high priority instead of waiting for their next natural reconcile.
+	affectedIngresses chan event.GenericEvent
 }
 
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=services;configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways;httproutes;referencegrants;backendtlspolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways;listenersets;httproutes;referencegrants;backendtlspolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.nginx.org,resources=clientsettingspolicies;proxysettingspolicies;authenticationfilters;snippetsfilters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.zyno.io,resources=ingresstranslations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.zyno.io,resources=ingresstranslations/status,verbs=get;update;patch
@@ -60,6 +79,16 @@ type IngressReconciler struct {
 func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("ingress", request.NamespacedName)
 	ctx = ctrl.LoggerInto(ctx, log)
+	if request.NamespacedName == certificateSyncKey {
+		if !r.Config.ManageGateway {
+			return ctrl.Result{}, nil
+		}
+		r.managedMu.Lock()
+		r.certificates = nil
+		r.managedMu.Unlock()
+		_, err := r.reconcileManagedGateway(ctx)
+		return ctrl.Result{}, err
+	}
 	if request.NamespacedName == globalReconcileKey {
 		if r.Config.ManageGateway {
 			_, err := r.reconcileManagedGateway(ctx)
@@ -232,7 +261,15 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, request ctrl.Request)
 	return ctrl.Result{}, nil
 }
 
+// reconcileManagedGateway rebuilds and applies the managed Gateway, its
+// overflow ListenerSets, and their certificate grants from the complete
+// selected Ingress set. It is the only place that mutates the sticky
+// planning state (listenerPlacements, certificates), so it holds managedMu
+// for its entire body.
 func (r *IngressReconciler) reconcileManagedGateway(ctx context.Context) (translator.GatewayPlan, error) {
+	r.managedMu.Lock()
+	defer r.managedMu.Unlock()
+
 	var ingressList networkingv1.IngressList
 	if err := r.List(ctx, &ingressList); err != nil {
 		return translator.GatewayPlan{}, err
@@ -243,18 +280,37 @@ func (r *IngressReconciler) reconcileManagedGateway(ctx context.Context) (transl
 			selected = append(selected, ingressList.Items[idx])
 		}
 	}
-	plan := translator.BuildManagedGateway(selected, translator.ManagedGatewayOptions{
-		Namespace:         r.Config.GatewayNamespace,
-		Name:              r.Config.GatewayName,
-		ClassName:         r.Config.GatewayClassName,
-		NginxProxyName:    r.Config.NginxProxyName,
-		AllowListenerSets: r.Config.AllowListenerSets,
-		HTTPSectionName:   r.Config.HTTPSectionName,
-		HTTPSSectionName:  r.Config.HTTPSSectionName,
-	})
-	if err := r.apply(ctx, &plan.Gateway); err != nil {
-		return plan, err
+
+	certificates, err := r.certificateInfos(ctx, selected)
+	if err != nil {
+		return translator.GatewayPlan{}, err
 	}
+	if r.listenerPlacements == nil {
+		observed, err := r.observedListenerPlacements(ctx)
+		if err != nil {
+			return translator.GatewayPlan{}, err
+		}
+		r.listenerPlacements = observed
+	}
+
+	options := translator.ManagedGatewayOptions{
+		Namespace:           r.Config.GatewayNamespace,
+		Name:                r.Config.GatewayName,
+		ClassName:           r.Config.GatewayClassName,
+		NginxProxyName:      r.Config.NginxProxyName,
+		AllowListenerSets:   r.Config.AllowListenerSets,
+		HTTPSectionName:     r.Config.HTTPSectionName,
+		HTTPSSectionName:    r.Config.HTTPSSectionName,
+		ListenerSetOverflow: r.Config.ListenerSetsAvailable,
+		Certificates:        certificates,
+		CurrentPlacements:   r.listenerPlacements,
+	}
+	plan := translator.BuildManagedGateway(selected, options)
+	changed := translator.ChangedTLSHosts(r.listenerPlacements, plan, options)
+	// Commit the new placement before applying, so a failure partway through
+	// still leaves subsequent replans sticky to what we are about to apply
+	// rather than repeatedly recomputing from a stale placement.
+	r.listenerPlacements = plan.Placements
 
 	desiredGrants := make(map[types.NamespacedName]struct{}, len(plan.ReferenceGrants))
 	for idx := range plan.ReferenceGrants {
@@ -263,6 +319,24 @@ func (r *IngressReconciler) reconcileManagedGateway(ctx context.Context) (transl
 			return plan, err
 		}
 		desiredGrants[client.ObjectKeyFromObject(grant)] = struct{}{}
+	}
+
+	if err := r.apply(ctx, &plan.Gateway); err != nil {
+		return plan, err
+	}
+
+	desiredSets := make(map[types.NamespacedName]struct{}, len(plan.ListenerSets))
+	for idx := range plan.ListenerSets {
+		set := &plan.ListenerSets[idx]
+		if err := r.apply(ctx, set); err != nil {
+			return plan, err
+		}
+		desiredSets[client.ObjectKeyFromObject(set)] = struct{}{}
+	}
+	if r.Config.ListenerSetsAvailable {
+		if err := r.pruneListenerSets(ctx, desiredSets); err != nil {
+			return plan, err
+		}
 	}
 
 	var current gatewayv1.ReferenceGrantList
@@ -280,6 +354,8 @@ func (r *IngressReconciler) reconcileManagedGateway(ctx context.Context) (transl
 			}
 		}
 	}
+
+	r.enqueueAffectedIngresses(selected, plan.TLSHosts, changed)
 	return plan, nil
 }
 
@@ -638,7 +714,9 @@ func (r *IngressReconciler) SetupWithManager(manager ctrl.Manager) error {
 	startup <- event.GenericEvent{Object: &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{Name: globalReconcileKey.Name},
 	}}
-	return ctrl.NewControllerManagedBy(manager).
+	r.affectedIngresses = make(chan event.GenericEvent, 1024)
+
+	builderInstance := ctrl.NewControllerManagedBy(manager).
 		For(&networkingv1.Ingress{}).
 		Watches(
 			&networkingv1.Ingress{},
@@ -658,6 +736,20 @@ func (r *IngressReconciler) SetupWithManager(manager ctrl.Manager) error {
 		Watches(&gatewayv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(r.gatewayToIngresses)).
 		Watches(&gatewayv1.ReferenceGrant{}, handler.EnqueueRequestsFromMapFunc(r.managedGrantToIngresses)).
 		WatchesRawSource(source.Channel(startup, &handler.EnqueueRequestForObject{})).
+		WatchesRawSource(source.Channel(r.affectedIngresses, prioritizedIngressHandler()))
+
+	if r.Config.ManageGateway && r.Config.ListenerSetsAvailable {
+		builderInstance = builderInstance.Watches(
+			&gatewayv1.ListenerSet{},
+			handler.EnqueueRequestsFromMapFunc(r.managedListenerSetToIngresses),
+			builder.WithPredicates(listenerSetChanged),
+		)
+	}
+	if r.Config.ManageGateway && r.Config.CollapseWildcardCertificates {
+		builderInstance = builderInstance.Watches(&corev1.Secret{}, r.secretEventHandler())
+	}
+
+	return builderInstance.
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }

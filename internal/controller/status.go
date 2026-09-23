@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	ngfv1alpha1 "github.com/nginx/nginx-gateway-fabric/v2/apis/v1alpha1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -185,6 +186,28 @@ func (r *IngressReconciler) generatedReady(
 		return metav1.ConditionFalse, "GatewayNotProgrammed", programmed.Message, nil
 	}
 
+	for _, name := range desiredListenerSets(desired, r.Config.GatewayNamespace) {
+		var set gatewayv1.ListenerSet
+		key := types.NamespacedName{Namespace: r.Config.GatewayNamespace, Name: name}
+		if err := r.Get(ctx, key, &set); err != nil {
+			if apierrors.IsNotFound(err) {
+				return metav1.ConditionUnknown, "ListenerSetPending", fmt.Sprintf("ListenerSet %s does not exist yet", name), nil
+			}
+			return metav1.ConditionUnknown, "LookupFailed", "could not read managed ListenerSet", err
+		}
+		for _, conditionType := range []gatewayv1.ListenerSetConditionType{
+			gatewayv1.ListenerSetConditionAccepted, gatewayv1.ListenerSetConditionProgrammed,
+		} {
+			condition := apimeta.FindStatusCondition(set.Status.Conditions, string(conditionType))
+			if condition == nil || condition.ObservedGeneration != set.Generation || condition.Status == metav1.ConditionUnknown {
+				return metav1.ConditionUnknown, "ListenerSetPending", fmt.Sprintf("ListenerSet %s has not reported %s", name, conditionType), nil
+			}
+			if condition.Status != metav1.ConditionTrue {
+				return metav1.ConditionFalse, "ListenerSetNotProgrammed", fmt.Sprintf("ListenerSet %s: %s", name, condition.Message), nil
+			}
+		}
+	}
+
 	for _, object := range desired {
 		switch policy := object.(type) {
 		case *ngfv1alpha1.ClientSettingsPolicy:
@@ -276,18 +299,11 @@ func (r *IngressReconciler) generatedReady(
 		if len(current.Status.Parents) == 0 {
 			return metav1.ConditionUnknown, "RoutePending", fmt.Sprintf("HTTPRoute %s has no parent status yet", route.Name), nil
 		}
-		foundParent := false
-		for _, parent := range current.Status.Parents {
-			if parent.ControllerName != nginxGatewayController {
-				continue
+		for _, want := range route.Spec.ParentRefs {
+			parent := matchingParentStatus(current.Status.Parents, want, current.Namespace)
+			if parent == nil {
+				return metav1.ConditionUnknown, "RoutePending", fmt.Sprintf("HTTPRoute %s has no status for the target Gateway", route.Name), nil
 			}
-			if parent.ParentRef.Name != gatewayv1.ObjectName(r.Config.GatewayName) {
-				continue
-			}
-			if parent.ParentRef.Namespace != nil && string(*parent.ParentRef.Namespace) != r.Config.GatewayNamespace {
-				continue
-			}
-			foundParent = true
 			for _, conditionType := range []gatewayv1.RouteConditionType{gatewayv1.RouteConditionAccepted, gatewayv1.RouteConditionResolvedRefs} {
 				condition := apimeta.FindStatusCondition(parent.Conditions, string(conditionType))
 				if condition == nil || condition.ObservedGeneration != current.Generation {
@@ -298,11 +314,104 @@ func (r *IngressReconciler) generatedReady(
 				}
 			}
 		}
-		if !foundParent {
-			return metav1.ConditionUnknown, "RoutePending", fmt.Sprintf("HTTPRoute %s has no status for the target Gateway", route.Name), nil
-		}
 	}
 	return metav1.ConditionTrue, "Programmed", "Gateway, generated routes, filters, and policies are programmed", nil
+}
+
+// desiredListenerSets returns the sorted, unique names of bridge-managed
+// ListenerSets that desired HTTPRoutes attach to, so their readiness can be
+// folded into the managed Gateway's own. A parentRef only counts when its
+// Kind is ListenerSet, its Group is unset or the Gateway API group, and its
+// effective namespace (explicit, or the route's own) is the Gateway namespace.
+func desiredListenerSets(desired []client.Object, gatewayNamespace string) []string {
+	names := make(map[string]struct{})
+	for _, object := range desired {
+		route, ok := object.(*gatewayv1.HTTPRoute)
+		if !ok {
+			continue
+		}
+		for _, ref := range route.Spec.ParentRefs {
+			if ref.Kind == nil || string(*ref.Kind) != translator.ListenerSetKind {
+				continue
+			}
+			if ref.Group != nil && string(*ref.Group) != gatewayv1.GroupName {
+				continue
+			}
+			namespace := route.Namespace
+			if ref.Namespace != nil {
+				namespace = string(*ref.Namespace)
+			}
+			if namespace != gatewayNamespace {
+				continue
+			}
+			names[string(ref.Name)] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(names))
+	for name := range names {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// matchingParentStatus finds the NGF-reported parent status matching want,
+// or nil if the route has not yet reported status for that specific parent.
+func matchingParentStatus(parents []gatewayv1.RouteParentStatus, want gatewayv1.ParentReference, routeNamespace string) *gatewayv1.RouteParentStatus {
+	for idx := range parents {
+		parent := &parents[idx]
+		if parent.ControllerName != nginxGatewayController {
+			continue
+		}
+		if sameParentRef(parent.ParentRef, want, routeNamespace) {
+			return parent
+		}
+	}
+	return nil
+}
+
+// sameParentRef compares a reported ParentReference against a desired one,
+// applying the same defaulting rules Gateway API defines: an absent Group is
+// the Gateway API group, an absent Kind is "Gateway", and an absent
+// Namespace is the route's own namespace.
+func sameParentRef(have, want gatewayv1.ParentReference, routeNamespace string) bool {
+	haveGroup, wantGroup := gatewayv1.GroupName, gatewayv1.GroupName
+	if have.Group != nil {
+		haveGroup = string(*have.Group)
+	}
+	if want.Group != nil {
+		wantGroup = string(*want.Group)
+	}
+	if haveGroup != wantGroup {
+		return false
+	}
+
+	haveKind, wantKind := translator.GatewayKind, translator.GatewayKind
+	if have.Kind != nil {
+		haveKind = string(*have.Kind)
+	}
+	if want.Kind != nil {
+		wantKind = string(*want.Kind)
+	}
+	if haveKind != wantKind || have.Name != want.Name {
+		return false
+	}
+
+	haveNamespace, wantNamespace := routeNamespace, routeNamespace
+	if have.Namespace != nil {
+		haveNamespace = string(*have.Namespace)
+	}
+	if want.Namespace != nil {
+		wantNamespace = string(*want.Namespace)
+	}
+	if haveNamespace != wantNamespace {
+		return false
+	}
+
+	if want.SectionName != nil && (have.SectionName == nil || *have.SectionName != *want.SectionName) {
+		return false
+	}
+	return true
 }
 
 func pendingObject(kind, name string, err error) (metav1.ConditionStatus, string, string, error) {

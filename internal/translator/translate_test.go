@@ -692,7 +692,7 @@ func TestEmptyTLSHostsInferIngressRuleHosts(t *testing.T) {
 	if translated.Fatal() {
 		t.Fatalf("plan unexpectedly fatal: %#v", translated.Issues)
 	}
-	wantSection := plan.TLSSections["app.zyno.io"]
+	wantSection := plan.TLSSections["app.zyno.io"].SectionName
 	if got := string(*translated.HTTPRoutes[0].Spec.ParentRefs[0].SectionName); got != wantSection {
 		t.Fatalf("listener = %q, want %q", got, wantSection)
 	}
@@ -713,7 +713,7 @@ func TestManagedGatewayUsesHostnameScopedTLSListeners(t *testing.T) {
 		t.Fatalf("listeners = %d, want HTTP plus two hostname-scoped HTTPS listeners", got)
 	}
 	for _, host := range []string{"app.zyno.io", "other.zyno.io"} {
-		section := plan.TLSSections[host]
+		section := plan.TLSSections[host].SectionName
 		if section == "" {
 			t.Fatalf("missing TLS section for %s", host)
 		}

@@ -53,10 +53,10 @@ type backendTLSConfig struct {
 }
 
 type hostInput struct {
-	hostname       string
-	paths          []networkingv1.HTTPIngressPath
-	tlsHostname    string
-	tlsSectionName string
+	hostname    string
+	paths       []networkingv1.HTTPIngressPath
+	tlsHostname string
+	tlsListener ListenerRef
 }
 
 type canaryHostInput struct {
@@ -492,12 +492,12 @@ func collectHosts(ing *networkingv1.Ingress, options Options, plan *Plan) []host
 	result := make([]hostInput, 0, len(ordered))
 	for _, host := range ordered {
 		tlsHostname := matchingTLSHost(host, tlsHosts)
-		tlsSectionName := options.Gateway.HTTPSSectionName
-		if section, exists := options.Gateway.TLSSections[tlsHostname]; exists {
-			tlsSectionName = section
+		var tlsListener ListenerRef
+		if tlsHostname != "" {
+			tlsListener = options.Gateway.TLSSections[tlsHostname]
 		}
 		result = append(result, hostInput{
-			hostname: host, paths: byHost[host], tlsHostname: tlsHostname, tlsSectionName: tlsSectionName,
+			hostname: host, paths: byHost[host], tlsHostname: tlsHostname, tlsListener: tlsListener,
 		})
 	}
 	return result
@@ -1283,15 +1283,65 @@ func applicationParentRefs(
 		return []gatewayv1.ParentReference{parentRef(namespace, false, input.hostname, options)}
 	}
 	tls := input.tlsHostname != ""
-	tlsOptions := options
-	if input.tlsSectionName != "" {
-		tlsOptions.HTTPSSectionName = input.tlsSectionName
+	var primary gatewayv1.ParentReference
+	if tls && input.tlsListener.Kind == ListenerSetKind {
+		// The declared hostname's listener overflowed onto a bridge-managed
+		// ListenerSet; attach there instead of the Gateway itself.
+		primary = listenerSetParentRef(namespace, input.tlsListener, options)
+	} else {
+		tlsOptions := options
+		if input.tlsListener.SectionName != "" {
+			tlsOptions.HTTPSSectionName = input.tlsListener.SectionName
+		}
+		primary = parentRef(namespace, tls, input.hostname, tlsOptions)
 	}
-	refs := []gatewayv1.ParentReference{parentRef(namespace, tls, input.hostname, tlsOptions)}
+	refs := []gatewayv1.ParentReference{primary}
 	if attachHTTP {
 		refs = append(refs, parentRef(namespace, false, input.hostname, options))
 	}
 	return refs
+}
+
+// listenerSetParentRef builds a ParentReference to a bridge-managed
+// ListenerSet listener. Gateway parent references stay byte-identical to
+// today's shape; only the overflow case ever sets Group/Kind.
+func listenerSetParentRef(routeNamespace string, l ListenerRef, options GatewayOptions) gatewayv1.ParentReference {
+	ref := gatewayv1.ParentReference{
+		Group: ptr(gatewayv1.Group(gatewayv1.GroupName)),
+		Kind:  ptr(gatewayv1.Kind(ListenerSetKind)),
+		Name:  gatewayv1.ObjectName(l.Name),
+	}
+	if options.Namespace != "" && options.Namespace != routeNamespace {
+		ref.Namespace = ptr(gatewayv1.Namespace(options.Namespace))
+	}
+	if l.SectionName != "" {
+		ref.SectionName = ptr(gatewayv1.SectionName(l.SectionName))
+	}
+	return ref
+}
+
+// RouteTLSHostnames returns declared TLS hostnames whose listeners this Ingress's routes attach to.
+func RouteTLSHostnames(ing *networkingv1.Ingress, tlsHosts map[string]struct{}) []string {
+	seen := make(map[string]struct{})
+	var result []string
+	add := func(raw string) {
+		matched := matchingTLSHost(strings.ToLower(strings.TrimSpace(raw)), tlsHosts)
+		if matched == "" {
+			return
+		}
+		if _, exists := seen[matched]; exists {
+			return
+		}
+		seen[matched] = struct{}{}
+		result = append(result, matched)
+	}
+	for _, rule := range ing.Spec.Rules {
+		add(rule.Host)
+	}
+	for _, alias := range splitCSV(ing.Annotations[annServerAlias]) {
+		add(alias)
+	}
+	return result
 }
 
 func isACMEHTTP01Solver(ing *networkingv1.Ingress) bool {

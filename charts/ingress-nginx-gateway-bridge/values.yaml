@@ -27,6 +27,10 @@ controller:
     # Permit platform-owned ListenerSets in the Gateway namespace to add
     # non-Ingress listeners such as SNI-based TLS passthrough.
     allowListenerSets: false
+    # Serve TLS hostnames covered by a wildcard certificate from one wildcard HTTPS listener.
+    # Grants cluster-wide get/list/watch on ALL Secrets (RBAC cannot scope by Secret type);
+    # a cache Transform ensures only a fingerprint and wildcard SANs are retained in memory.
+    collapseWildcardCertificates: true
     httpSectionName: http
     # Shared HTTPS listener name.
     httpsSectionName: https

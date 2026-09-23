@@ -9,10 +9,15 @@ import (
 	"strings"
 
 	ngfv1alpha1 "github.com/nginx/nginx-gateway-fabric/v2/apis/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -46,6 +51,7 @@ func main() {
 	flag.StringVar(&config.NginxProxyName, "nginx-proxy-name", "", "Optional same-namespace NginxProxy referenced by a managed Gateway (required for ExternalName Service DNS resolution).")
 	flag.BoolVar(&config.ManageGateway, "manage-gateway", true, "Create the target Gateway and derive its listeners from selected Ingresses.")
 	flag.BoolVar(&config.AllowListenerSets, "allow-listener-sets", false, "Allow ListenerSets from the managed Gateway's namespace.")
+	flag.BoolVar(&config.CollapseWildcardCertificates, "collapse-wildcard-certificates", true, "Serve TLS hostnames covered by a wildcard certificate from one wildcard HTTPS listener (requires cluster-wide get/list/watch on TLS Secrets).")
 	flag.StringVar(&config.HTTPSectionName, "http-section-name", "http", "HTTP listener section name.")
 	flag.StringVar(&config.HTTPSSectionName, "https-section-name", "https", "HTTPS listener section name used in route-only mode.")
 	flag.BoolVar(&config.WatchIngressWithoutClass, "watch-ingress-without-class", true, "Translate Ingresses with no class.")
@@ -77,16 +83,37 @@ func main() {
 		os.Exit(1)
 	}
 
+	var cacheOptions cache.Options
+	if config.ManageGateway && config.CollapseWildcardCertificates {
+		cacheOptions.ByObject = map[client.Object]cache.ByObject{
+			&corev1.Secret{}: controller.SecretCacheByObject(),
+		}
+	}
+
 	manager, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddress},
 		HealthProbeBindAddress: probeAddress,
 		LeaderElection:         leaderElect,
 		LeaderElectionID:       "ingress-nginx-gateway-bridge.gateway.zyno.io",
+		Cache:                  cacheOptions,
 	})
 	if err != nil {
 		setupLog.Error(err, "create manager")
 		os.Exit(1)
+	}
+
+	if config.ManageGateway {
+		_, err := manager.GetRESTMapper().RESTMapping(schema.GroupKind{Group: gatewayv1.GroupName, Kind: "ListenerSet"}, "v1")
+		switch {
+		case err == nil:
+			config.ListenerSetsAvailable = true
+		case apimeta.IsNoMatchError(err):
+			setupLog.Info("ListenerSet API not installed; managed Gateway limited to 63 TLS listeners")
+		default:
+			setupLog.Error(err, "check ListenerSet API availability")
+			os.Exit(1)
+		}
 	}
 
 	reconciler := &controller.IngressReconciler{Client: manager.GetClient(), Scheme: manager.GetScheme(), Config: config}
@@ -107,6 +134,8 @@ func main() {
 		"gateway", config.GatewayNamespace+"/"+config.GatewayName,
 		"manageGateway", config.ManageGateway,
 		"allowListenerSets", config.AllowListenerSets,
+		"collapseWildcardCertificates", config.CollapseWildcardCertificates,
+		"listenerSetsAvailable", config.ListenerSetsAvailable,
 		"watchClassless", config.WatchIngressWithoutClass,
 		"ingressClasses", ingressClasses,
 		"strict", config.Strict,

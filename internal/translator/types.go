@@ -29,6 +29,22 @@ const (
 	TranslationStatusFailed  = "failed"
 )
 
+const (
+	GatewayKind     = "Gateway"
+	ListenerSetKind = "ListenerSet"
+	// ListenerSetIndexLabel records the 1-based overflow index of a
+	// bridge-managed ListenerSet so it can be identified without parsing its name.
+	ListenerSetIndexLabel = "gateway.zyno.io/listener-set-index"
+)
+
+// ListenerRef identifies the listener serving a declared TLS hostname.
+// Namespace is always the Gateway namespace, so it is not tracked here.
+type ListenerRef struct {
+	Kind        string
+	Name        string
+	SectionName string
+}
+
 // SourceNameLabelValue returns a valid label value for an Ingress name.
 func SourceNameLabelValue(name string) string {
 	if len(name) <= 63 {
@@ -65,7 +81,7 @@ type GatewayOptions struct {
 	Name             string
 	HTTPSectionName  string
 	HTTPSSectionName string
-	TLSSections      map[string]string
+	TLSSections      map[string]ListenerRef
 	ManagedListeners bool
 }
 

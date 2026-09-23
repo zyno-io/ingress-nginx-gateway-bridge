@@ -21,6 +21,12 @@ type Config struct {
 	AllowListenerSets bool
 	HTTPSectionName   string
 	HTTPSSectionName  string
+	// CollapseWildcardCertificates serves TLS hostnames covered by a
+	// wildcard certificate from one shared wildcard HTTPS listener.
+	CollapseWildcardCertificates bool
+	// ListenerSetsAvailable reports whether the ListenerSet CRD is installed,
+	// allowing the managed Gateway to overflow beyond 63 HTTPS listeners.
+	ListenerSetsAvailable bool
 
 	WatchIngressWithoutClass bool
 	IngressClasses           map[string]struct{}
